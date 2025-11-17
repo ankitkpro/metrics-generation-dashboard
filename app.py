@@ -22,8 +22,8 @@ GCS_PARENT_FOLDER_NAME = "cricket_batting/"
 # SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
 SERVICE_ACCOUNT_FILE_JSON = st.secrets["SERVICE_ACCOUNT_FILE"]
 # st.write(SERVICE_ACCOUNT_FILE_JSON)
-SERVICE_ACCOUNT_FILE = json.loads(SERVICE_ACCOUNT_FILE_JSON)
-# SERVICE_ACCOUNT_FILE = SERVICE_ACCOUNT_FILE_JSON
+# SERVICE_ACCOUNT_FILE = json.loads(SERVICE_ACCOUNT_FILE_JSON)
+SERVICE_ACCOUNT_FILE = SERVICE_ACCOUNT_FILE_JSON
 
 
 # BASE_URL = os.getenv("FLYTE_API_BASE_URL")
@@ -795,6 +795,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
