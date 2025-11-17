@@ -47,11 +47,11 @@ def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
     try:
         storage_client = storage.Client.from_service_account_info(SERVICE_ACCOUNT_FILE)
-        st.write("Using GCS service account: kpro-ai-video-json-access@kpro-staging.iam.gserviceaccount.com")
+        print("Using GCS service account: kpro-ai-video-json-access@kpro-staging.iam.gserviceaccount.com")
         
         return storage_client
     except Exception as e:
-        st.write(f"Error authenticating with GCS: {e}")
+        print(f"Error authenticating with GCS: {e}")
         
         raise Exception(f"Could not authenticate with GCS: {str(e)}")
 
@@ -94,7 +94,7 @@ def download_gcs_file_to_bytes(bucket_name, blob_name):
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         video_bytes = blob.download_as_bytes()
-        st.write(f'Downloaded Video {blob_name}')
+        print(f'Downloaded Video {blob_name}')
         return video_bytes
     except Exception as e:
         print(f"Error downloading GCS file: {e}")
@@ -240,11 +240,11 @@ def process_clip_to_bytes(video_bytes, clip_name):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
             temp_input.write(video_bytes)
             temp_input_path = temp_input.name
-            st.write(f'Temp Input Path: {temp_input_path}')
+            print(f'Temp Input Path: {temp_input_path}')
         
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
             temp_output_path = temp_output.name
-            st.write(f'Temp Output Path: {temp_output_path}')
+            print(f'Temp Output Path: {temp_output_path}')
         
         try:
             clip = mp.VideoFileClip(temp_input_path)
@@ -262,7 +262,7 @@ def process_clip_to_bytes(video_bytes, clip_name):
                 os.unlink(temp_output_path)
                 
     except Exception as e:
-        st.write(f"Error processing clip {clip_name}: {e}")
+        print(f"Error processing clip {clip_name}: {e}")
         return None
 
 # ============================================================================
@@ -802,6 +802,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
