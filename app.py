@@ -248,7 +248,7 @@ def process_clip_to_bytes(video_bytes, clip_name):
         
         try:
             clip = mp.VideoFileClip(temp_input_path)
-            clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, verbose=False, logger=None)
+            clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
             clip.close()
             
             with open(temp_output_path, 'rb') as f:
@@ -802,6 +802,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
