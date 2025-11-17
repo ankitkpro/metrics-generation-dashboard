@@ -2,7 +2,8 @@ import streamlit as st
 from pymongo import MongoClient
 import os
 import tempfile
-import moviepy.editor as mp
+import moviepy
+mp = moviepy.editor
 from google.cloud import storage
 from datetime import timedelta
 import json
@@ -793,5 +794,6 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
