@@ -94,9 +94,11 @@ def download_gcs_file_to_bytes(bucket_name, blob_name):
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         video_bytes = blob.download_as_bytes()
+        st.write(f'Downloaded Video {blob_name}')
         return video_bytes
     except Exception as e:
         print(f"Error downloading GCS file: {e}")
+        st.error(f'Error downloading GCS file: {e}')
         return None
 
 def upload_to_gcs(bucket_name, source_file_name, destination_blob_name, signed_url_flag=False):
@@ -238,9 +240,11 @@ def process_clip_to_bytes(video_bytes, clip_name):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
             temp_input.write(video_bytes)
             temp_input_path = temp_input.name
+            st.write(f'Temp Input Path: {temp_input_path}')
         
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
             temp_output_path = temp_output.name
+            st.write(f'Temp Output Path: {temp_output_path}')
         
         try:
             clip = mp.VideoFileClip(temp_input_path)
@@ -258,7 +262,7 @@ def process_clip_to_bytes(video_bytes, clip_name):
                 os.unlink(temp_output_path)
                 
     except Exception as e:
-        print(f"Error processing clip {clip_name}: {e}")
+        st.write(f"Error processing clip {clip_name}: {e}")
         return None
 
 # ============================================================================
@@ -798,6 +802,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
