@@ -47,10 +47,12 @@ def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
     try:
         storage_client = storage.Client.from_service_account_info(SERVICE_ACCOUNT_FILE)
-        print("Using GCS service account: kpro-ai-video-json-access@kpro-staging.iam.gserviceaccount.com")
+        st.write("Using GCS service account: kpro-ai-video-json-access@kpro-staging.iam.gserviceaccount.com")
+        
         return storage_client
     except Exception as e:
-        print(f"Error authenticating with GCS: {e}")
+        st.write(f"Error authenticating with GCS: {e}")
+        
         raise Exception(f"Could not authenticate with GCS: {str(e)}")
 
 def parse_gsutil_url(gsutil_url):
@@ -796,6 +798,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
