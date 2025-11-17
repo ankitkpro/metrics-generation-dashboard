@@ -20,17 +20,17 @@ load_dotenv()
 GCS_BUCKET_NAME = "qr-ai"
 GCS_PARENT_FOLDER_NAME = "cricket_batting/"
 # SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
-SERVICE_ACCOUNT_FILE_JSON = st.secrets("SERVICE_ACCOUNT_FILE")
+SERVICE_ACCOUNT_FILE_JSON = st.secrets["SERVICE_ACCOUNT_FILE"]
 SERVICE_ACCOUNT_FILE = json.loads(SERVICE_ACCOUNT_FILE_JSON)
 
 
 # BASE_URL = os.getenv("FLYTE_API_BASE_URL")
-BASE_URL = st.secrets("FLYTE_API_BASE_URL")
+BASE_URL = st.secrets["FLYTE_API_BASE_URL"]
 API_KEY = os.getenv("FLYTE_API_KEY")
 
 # MongoDB connection
 # connection_string = os.getenv("MONGO_CONNECTION_STRING")
-connection_string = st.secrets("MONGO_CONNECTION_STRING")
+connection_string = st.secrets["MONGO_CONNECTION_STRING"]
 client = MongoClient(connection_string)
 db = client['kpro']
 gallery_collection = db['gallery']
@@ -793,6 +793,7 @@ with st.sidebar:
         st.session_state.task_status = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
