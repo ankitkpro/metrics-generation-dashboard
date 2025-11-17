@@ -43,16 +43,15 @@ users_collection = db['users']
 # GCS UTILITY FUNCTIONS
 # ============================================================================
 
+
 def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
     try:
         storage_client = storage.Client.from_service_account_info(SERVICE_ACCOUNT_FILE)
         print("Using GCS service account: kpro-ai-video-json-access@kpro-staging.iam.gserviceaccount.com")
-        
         return storage_client
     except Exception as e:
         print(f"Error authenticating with GCS: {e}")
-        
         raise Exception(f"Could not authenticate with GCS: {str(e)}")
 
 def parse_gsutil_url(gsutil_url):
@@ -94,11 +93,9 @@ def download_gcs_file_to_bytes(bucket_name, blob_name):
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         video_bytes = blob.download_as_bytes()
-        print(f'Downloaded Video {blob_name}')
         return video_bytes
     except Exception as e:
         print(f"Error downloading GCS file: {e}")
-        st.error(f'Error downloading GCS file: {e}')
         return None
 
 def upload_to_gcs(bucket_name, source_file_name, destination_blob_name, signed_url_flag=False):
@@ -240,11 +237,9 @@ def process_clip_to_bytes(video_bytes, clip_name):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
             temp_input.write(video_bytes)
             temp_input_path = temp_input.name
-            print(f'Temp Input Path: {temp_input_path}')
         
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
             temp_output_path = temp_output.name
-            print(f'Temp Output Path: {temp_output_path}')
         
         try:
             clip = mp.VideoFileClip(temp_input_path)
@@ -266,8 +261,226 @@ def process_clip_to_bytes(video_bytes, clip_name):
         return None
 
 # ============================================================================
+# SCORING & METRICS FUNCTIONS
+# ============================================================================
+
+def get_score(angle, ball_direction, lefty=False):
+    """Calculate score based on shot angle and ball direction"""
+    shot_angle = int(angle)
+
+    scoring_rules = {
+        False: {  # Right-handed batter
+            'Off Stump': [(100, 120, 5), (90, 100, 4), (120, 130, 4), (80, 90, 3), (130, 140, 3),
+                          (70, 80, 2), (140, 150, 2), (60, 70, 1), (150, 160, 1)],
+            'Outside Off Stump': [(110, 150, 5), (100, 110, 4), (150, 160, 4), (90, 100, 3),
+                                  (160, 170, 3), (80, 90, 2), (170, 180, 2), (70, 80, 1)],
+            'Middle Stump': [(80, 100, 5), (70, 80, 4), (100, 110, 4), (60, 70, 3), (110, 120, 3),
+                             (50, 60, 2), (120, 130, 2), (40, 50, 1), (130, 140, 1)],
+            'Leg Stump': [(60, 80, 5), (50, 60, 4), (80, 90, 4), (40, 50, 3), (90, 100, 3),
+                          (30, 40, 2), (20, 30, 1)],
+        },
+        True: {  # Left-handed batter
+            'Off Stump': [(60, 80, 5), (50, 60, 4), (80, 90, 4), (40, 50, 3), (90, 100, 3),
+                          (30, 40, 2), (20, 30, 1)],
+            'Outside Off Stump': [(30, 60, 5), (20, 30, 4), (60, 70, 4), (10, 20, 3),
+                                  (70, 80, 3), (0, 10, 2), (80, 90, 2), (90, 100, 1)],
+            'Middle Stump': [(80, 100, 5), (70, 80, 4), (100, 110, 4), (60, 70, 3), (110, 120, 3),
+                             (50, 60, 2), (120, 130, 2), (40, 50, 1), (130, 140, 1)],
+            'Leg Stump': [(100, 120, 5), (90, 100, 4), (120, 130, 4), (80, 90, 3), (130, 140, 3),
+                          (140, 150, 2), (150, 160, 1)],
+        }
+    }
+
+    for low, high, score in scoring_rules[lefty].get(ball_direction, []):
+        if low < shot_angle <= high:
+            return score
+    return 0
+
+def shot_direction_metrics(shot_direction_angles, batter_hand):
+    """Convert shot direction angles to direction names"""
+    lefty = batter_hand == 'Left'
+
+    righty_angles = [
+        ((60, 80), "Mid On"),
+        ((100, 110), "Mid Off"),
+        ((110, 150), "Cover"),
+        ((80, 100), "Straight"),
+        ((30, 60), "Mid Wicket"),
+        ((0, 30), "Square Leg"),
+        ((150, 180), "Point"),
+    ]
+
+    lefty_angles = [
+        ((70, 80), "Mid Off"),
+        ((100, 120), "Mid On"),
+        ((30, 70), "Cover"),
+        ((80, 100), "Straight"),
+        ((0, 30), "Point"),
+        ((120, 150), "Mid Wicket"),
+        ((150, 180), "Square Leg"),
+    ]
+
+    angles = lefty_angles if lefty else righty_angles
+
+    shot_directions = []
+    for i in range(len(shot_direction_angles)):
+        shot_direction_angle_degrees = shot_direction_angles[i]
+        if shot_direction_angle_degrees <= 0 or shot_direction_angle_degrees >= 180:
+            shot_directions.append('Behind the Wicket')
+        else:
+            found = False
+            for (low, high), shot_direction in angles:
+                if low < shot_direction_angle_degrees <= high:
+                    shot_directions.append(shot_direction)
+                    found = True
+                    break
+            if not found:
+                shot_directions.append('Behind the Wicket')
+
+    return shot_directions
+
+def get_score_metrics(final_metrics, drill_type):
+    """Calculate score metrics and insights"""
+    ball_directions = final_metrics['ball_direction']
+    shot_directions = final_metrics['shot_direction']
+    scores = final_metrics['score']
+    shot_accuracy = final_metrics['shot_accuracy']
+    
+    back_leg = []
+    head_over_ball = []
+    for i in range(len(final_metrics['batter_hand'])):
+        if final_metrics['batter_hand'][i] == 'Right':
+            if final_metrics['backleg_knee_angle'][i] > 150:
+                back_leg.append('Straight')
+            else:
+                back_leg.append('Slightly Bent')
+
+            if final_metrics['head_to_ball_angle'][i] < 110:
+                head_over_ball.append('Yes')
+            else:
+                head_over_ball.append('No')
+
+        if final_metrics['batter_hand'][i] == 'Left':
+            if final_metrics['backleg_knee_angle'][i] < 30:
+                back_leg.append('Straight')
+            else:
+                back_leg.append('Slightly Bent')
+
+            if final_metrics['head_to_ball_angle'][i] > 70:
+                head_over_ball.append('Yes')
+            else:
+                head_over_ball.append('No')
+
+    percentile = int(20 * sum(scores) / len(scores))
+
+    if percentile > 90:
+        grade = 'A+'
+    elif percentile > 80:
+        grade = 'A'
+    elif percentile > 70:
+        grade = 'B+'
+    elif percentile > 60:
+        grade = 'B'
+    elif percentile > 50:
+        grade = 'C+'
+    elif percentile > 40:
+        grade = 'C'
+    else:
+        grade = 'D'
+
+    json_dict = {}
+    json_dict['percentile'] = percentile
+    json_dict['grade'] = grade
+
+    if 'back' not in drill_type:
+        ball_insights = []
+        ball_comments = []
+
+        for i in range(len(ball_directions)):
+            current_score = scores[i]
+            if current_score == 5:
+                ball_insights.append('Good')
+            elif current_score == 4 or current_score == 3:
+                ball_insights.append('Average')
+            elif current_score < 3:
+                ball_insights.append('Bad')
+
+            if shot_directions[i] in ['Square Leg', 'Point', 'Straight', 'Mid On', 'Mid Off', 'Cover', 'Mid Wicket']:
+                comment = ball_directions[i] + ' Ball Hit to ' + shot_directions[i]
+            else:
+                comment = ball_directions[i] + ' Ball Mistimed'
+
+            if shot_accuracy[i] == 'Inaccurate':
+                ball_comments.append(f'Inaccurate: {comment}.')
+            else:
+                ball_comments.append(f'Accurate: {comment}.')
+
+        json_dict['insights'] = {
+            'ball_insights': ball_insights,
+            'ball_comments': ball_comments
+        }
+
+    return json_dict
+
+def recalculate_metrics(metrics, shot_direction_angles, ball_directions, batter_hand):
+    """Recalculate all metrics based on updated angles and directions"""
+    # Update base values
+    metrics['shot_direction_angles'] = shot_direction_angles
+    metrics['ball_directions'] = ball_directions
+
+    # Calculate scores
+    scores = []
+    for i in range(len(shot_direction_angles)):
+        score = get_score(shot_direction_angles[i], ball_directions[i], batter_hand == 'Left')
+        scores.append(score)
+    
+    metrics['new_metrics']['score'] = scores
+    metrics['new_metrics']['shot_accuracy'] = ['Accurate' if score >= 3 else 'Inaccurate' for score in scores]
+
+    # Calculate shot directions
+    shot_directions = shot_direction_metrics(shot_direction_angles, batter_hand)
+    metrics['new_metrics']['shot_direction'] = shot_directions
+    metrics['new_metrics']['shot_direction_angle'] = shot_direction_angles
+    metrics['new_metrics']['ball_direction'] = ball_directions
+
+    # Calculate insights and grade
+    final_metrics = metrics['new_metrics']
+    drill_type = metrics.get('drill_type', '')
+    score_metrics = get_score_metrics(final_metrics, drill_type)
+    metrics['insights'] = score_metrics.get('insights', {})
+    metrics['percentile'] = score_metrics['percentile']
+    metrics['grade'] = score_metrics['grade']
+
+    return metrics
+
+# ============================================================================
 # DATABASE & DRILL FUNCTIONS
 # ============================================================================
+
+def fetch_drill_results(assessment_id):
+    """Fetch drill results from MongoDB"""
+    try:
+        search_query = {"assessment_id": assessment_id}
+        drill_doc = drills_collection.find_one(search_query)
+        return drill_doc
+    except Exception as e:
+        print(f"Error fetching drill results: {e}")
+        return None
+
+def update_drill_results_in_mongo(assessment_id, drill_type, updated_metrics):
+    """Update drill results in MongoDB"""
+    try:
+        search_query = {"assessment_id": assessment_id}
+        update_query = {
+            "$set": {
+                f"drill_metrics.{drill_type}": updated_metrics
+            }
+        }
+        result = drills_collection.update_one(search_query, update_query)
+        return result.modified_count > 0
+    except Exception as e:
+        print(f"Error updating drill results: {e}")
+        return False
 
 def search_assessment(assessment_id):
     """Search for player and drills by assessment ID"""
@@ -499,6 +712,16 @@ if 'execution_ids' not in st.session_state:
     st.session_state.execution_ids = {}
 if 'task_status' not in st.session_state:
     st.session_state.task_status = {}
+if 'drill_metrics_data' not in st.session_state:
+    st.session_state.drill_metrics_data = {}
+if 'edited_angles' not in st.session_state:
+    st.session_state.edited_angles = {}
+if 'edited_directions' not in st.session_state:
+    st.session_state.edited_directions = {}
+if 'original_values' not in st.session_state:
+    st.session_state.original_values = {}
+if 'mongo_drill_keys' not in st.session_state:
+    st.session_state.mongo_drill_keys = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -542,6 +765,11 @@ if search_button and assessment_id:
         st.session_state.signed_urls = {}
         st.session_state.execution_ids = {}
         st.session_state.task_status = {}
+        st.session_state.drill_metrics_data = {}
+        st.session_state.edited_angles = {}
+        st.session_state.edited_directions = {}
+        st.session_state.original_values = {}
+        st.session_state.mongo_drill_keys = {}
         st.success(f"Found assessment for {player_name}")
 
 # Display results
@@ -734,6 +962,208 @@ if st.session_state.searched:
                                 
                                 with st.expander("View Full Status", expanded=is_done):
                                     st.json(status_data)
+                                
+                                # Show metrics editor for drive drills when task is completed
+                                if is_done and drill_type in ['tophand', 'bottomhand', 'backfoot_drive', 'backfoot_defense']:
+                                    st.divider()
+                                    st.subheader("✏️ Edit Metrics")
+                                    
+                                    # Map drill types to MongoDB keys
+                                    drill_type_mapping = {
+                                        'tophand': 'top_hand',
+                                        'bottomhand': 'bottom_hand',
+                                        'backfoot_drive': 'backfoot',
+                                        'backfoot_defense': 'backfoot',
+                                        'power_hitting': 'power_hitting',
+                                        'hold_your_pose': 'hold_your_pose'
+                                    }
+                                    
+                                    # Fetch drill results from MongoDB
+                                    metrics_key = f"{st.session_state.assessment_id}_{drill_type}"
+                                    
+                                    if metrics_key not in st.session_state.drill_metrics_data:
+                                        with st.spinner("Loading drill metrics from MongoDB..."):
+                                            drill_doc = fetch_drill_results(st.session_state.assessment_id)
+                                            
+                                            if drill_doc and 'drill_metrics' in drill_doc:
+                                                drill_metrics = drill_doc['drill_metrics']
+                                                
+                                                # Show available drills for debugging
+                                                available_drills = list(drill_metrics.keys())
+                                                st.info(f"📋 Available drills in MongoDB: {', '.join(available_drills)}")
+                                                
+                                                # Try to find the drill using mapping
+                                                mongo_drill_key = drill_type_mapping.get(drill_type, drill_type)
+                                                
+                                                # Also try alternate keys
+                                                possible_keys = [mongo_drill_key, drill_type]
+                                                found_key = None
+                                                
+                                                for key in possible_keys:
+                                                    if key in drill_metrics:
+                                                        found_key = key
+                                                        break
+                                                
+                                                if found_key:
+                                                    st.session_state.drill_metrics_data[metrics_key] = drill_metrics[found_key]
+                                                    st.session_state.mongo_drill_keys[metrics_key] = found_key
+                                                    
+                                                    # Initialize edited values
+                                                    metrics = drill_metrics[found_key]
+                                                    shot_angles = metrics.get('shot_direction_angles', [])
+                                                    ball_dirs = metrics.get('ball_directions', [])
+                                                    
+                                                    if not shot_angles or not ball_dirs:
+                                                        st.error(f"⚠️ Drill '{found_key}' exists but has no shot_direction_angles or ball_directions data")
+                                                    else:
+                                                        st.session_state.edited_angles[metrics_key] = shot_angles.copy()
+                                                        st.session_state.edited_directions[metrics_key] = ball_dirs.copy()
+                                                        st.session_state.original_values[metrics_key] = {
+                                                            'angles': shot_angles.copy(),
+                                                            'directions': ball_dirs.copy()
+                                                        }
+                                                else:
+                                                    st.warning(f"❌ No metrics found for '{drill_type}' (tried keys: {', '.join(possible_keys)}) in MongoDB")
+                                                    st.write("**Available drill types to select from:**")
+                                                    for avail_drill in available_drills:
+                                                        st.write(f"- {avail_drill}")
+                                            else:
+                                                st.warning("No drill results found in MongoDB for this assessment")
+                                    
+                                    if metrics_key in st.session_state.drill_metrics_data:
+                                        metrics = st.session_state.drill_metrics_data[metrics_key]
+                                        
+                                        # Get the actual MongoDB key that was found
+                                        mongo_drill_key = st.session_state.mongo_drill_keys.get(metrics_key, drill_type)
+                                        
+                                        # Get batter hand for calculations
+                                        batter_hand = 'Right'
+                                        if 'new_metrics' in metrics and 'batter_hand' in metrics['new_metrics']:
+                                            batter_hands = metrics['new_metrics']['batter_hand']
+                                            if batter_hands:
+                                                batter_hand = max(set(batter_hands), key=batter_hands.count)
+                                        
+                                        st.write(f"**Batter Hand:** {batter_hand}")
+                                        st.write(f"**MongoDB Drill Key:** `{mongo_drill_key}`")
+                                        
+                                        # Ball direction options
+                                        ball_direction_options = ['Off Stump', 'Outside Off Stump', 'Middle Stump', 'Leg Stump']
+                                        
+                                        num_shots = len(st.session_state.edited_angles[metrics_key])
+                                        st.write(f"**Number of Shots:** {num_shots}")
+                                        
+                                        # Create editable fields in a table-like format
+                                        st.write("**Edit Shot Direction Angles and Ball Directions:**")
+                                        
+                                        # Header row
+                                        col1, col2, col3 = st.columns([1, 2, 2])
+                                        with col1:
+                                            st.write("**Shot #**")
+                                        with col2:
+                                            st.write("**Shot Direction Angle**")
+                                        with col3:
+                                            st.write("**Ball Direction**")
+                                        
+                                        for i in range(num_shots):
+                                            col1, col2, col3 = st.columns([1, 2, 2])
+                                            
+                                            with col1:
+                                                st.write(f"Shot {i+1}")
+                                            
+                                            with col2:
+                                                current_angle = st.session_state.edited_angles[metrics_key][i]
+                                                new_angle = st.number_input(
+                                                    f"Angle {i+1}",
+                                                    value=float(current_angle),
+                                                    step=1.0,
+                                                    key=f"angle_{drill_type}_{i}",
+                                                    label_visibility="collapsed"
+                                                )
+                                                st.session_state.edited_angles[metrics_key][i] = new_angle
+                                            
+                                            with col3:
+                                                current_direction = st.session_state.edited_directions[metrics_key][i]
+                                                direction_index = ball_direction_options.index(current_direction) if current_direction in ball_direction_options else 0
+                                                new_direction = st.selectbox(
+                                                    f"Ball Direction {i+1}",
+                                                    options=ball_direction_options,
+                                                    index=direction_index,
+                                                    key=f"direction_{drill_type}_{i}",
+                                                    label_visibility="collapsed"
+                                                )
+                                                st.session_state.edited_directions[metrics_key][i] = new_direction
+                                        
+                                        # Check if values have changed
+                                        angles_changed = st.session_state.edited_angles[metrics_key] != st.session_state.original_values[metrics_key]['angles']
+                                        directions_changed = st.session_state.edited_directions[metrics_key] != st.session_state.original_values[metrics_key]['directions']
+                                        values_changed = angles_changed or directions_changed
+                                        
+                                        # Update button
+                                        col1, col2, col3 = st.columns([1, 2, 2])
+                                        with col1:
+                                            update_button = st.button(
+                                                "💾 Update Metrics",
+                                                key=f"update_{drill_type}",
+                                                disabled=not values_changed,
+                                                use_container_width=True
+                                            )
+                                        
+                                        if values_changed:
+                                            st.info("⚠️ You have unsaved changes")
+                                        
+                                        if update_button:
+                                            with st.spinner("Updating metrics..."):
+                                                try:
+                                                    # Recalculate all metrics
+                                                    updated_metrics = recalculate_metrics(
+                                                        metrics,
+                                                        st.session_state.edited_angles[metrics_key],
+                                                        st.session_state.edited_directions[metrics_key],
+                                                        batter_hand
+                                                    )
+                                                    
+                                                    # Update in MongoDB using the correct key
+                                                    success = update_drill_results_in_mongo(
+                                                        st.session_state.assessment_id,
+                                                        mongo_drill_key,
+                                                        updated_metrics
+                                                    )
+                                                    
+                                                    if success:
+                                                        st.success("✅ Metrics updated successfully in MongoDB!")
+                                                        
+                                                        # Update session state
+                                                        st.session_state.drill_metrics_data[metrics_key] = updated_metrics
+                                                        st.session_state.original_values[metrics_key] = {
+                                                            'angles': st.session_state.edited_angles[metrics_key].copy(),
+                                                            'directions': st.session_state.edited_directions[metrics_key].copy()
+                                                        }
+                                                        
+                                                        # Display updated metrics
+                                                        st.divider()
+                                                        st.subheader("📊 Updated Metrics")
+                                                        
+                                                        with st.expander("View Updated MongoDB Document", expanded=True):
+                                                            st.json(updated_metrics)
+                                                        
+                                                        # Display key metrics
+                                                        col1, col2, col3 = st.columns(3)
+                                                        with col1:
+                                                            st.metric("Grade", updated_metrics.get('grade', 'N/A'))
+                                                        with col2:
+                                                            st.metric("Percentile", f"{updated_metrics.get('percentile', 0)}%")
+                                                        with col3:
+                                                            if 'new_metrics' in updated_metrics and 'score' in updated_metrics['new_metrics']:
+                                                                avg_score = sum(updated_metrics['new_metrics']['score']) / len(updated_metrics['new_metrics']['score'])
+                                                                st.metric("Avg Score", f"{avg_score:.2f}")
+                                                        
+                                                        st.rerun()
+                                                    else:
+                                                        st.error("❌ Failed to update metrics in MongoDB")
+                                                
+                                                except Exception as e:
+                                                    st.error(f"Error updating metrics: {str(e)}")
+                                                    st.exception(e)
                 else:
                     st.info("👆 Select clips above to run Flyte task")
     else:
@@ -752,6 +1182,8 @@ with st.sidebar:
     6. Upload clips to GCS
     7. Run Flyte tasks with custom inputs
     8. Monitor task execution status
+    9. Edit shot angles and ball directions (drive drills)
+    10. Auto-recalculate metrics and save to MongoDB
     """)
     
     if st.session_state.searched:
@@ -800,28 +1232,13 @@ with st.sidebar:
         st.session_state.signed_urls = {}
         st.session_state.execution_ids = {}
         st.session_state.task_status = {}
+        st.session_state.drill_metrics_data = {}
+        st.session_state.edited_angles = {}
+        st.session_state.edited_directions = {}
+        st.session_state.original_values = {}
+        st.session_state.mongo_drill_keys = {}
         st.success("Cache cleared!")
         st.rerun()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
