@@ -43,7 +43,6 @@ users_collection = db['users']
 # GCS UTILITY FUNCTIONS
 # ============================================================================
 
-
 def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
     try:
@@ -500,6 +499,8 @@ def search_assessment(assessment_id):
         for doc in gallery_results:
             drill = doc.get('title', '')
             clips = doc.get('clips', [])
+            drill_id = doc.get('drill_id', '')
+            activity_id = doc.get('activity_id', '')
             
             # Determine drill type
             if 'top' in drill.lower():
@@ -516,15 +517,26 @@ def search_assessment(assessment_id):
                 drill_type = 'feet_planted'
             elif 'power' in drill.lower():
                 drill_type = 'power_hitting'
-            elif 'run' in drill.lower():
-                drill_type = 'running_bw_wickets'
+            elif 'run' in drill.lower() or 'batting_three_run' in drill.lower():
+                drill_type = 'running_drill'
             else:
                 drill_type = drill.lower().replace(' ', '_')
             
-            if clips:
+            # Handle batting_three_run (running drill) with single video
+            if 'batting_three_run' in drill.lower() and drill_id and activity_id:
+                video_url = f"gs://uploads.storage.khiladipro.com/{drill_id}/{activity_id}/{activity_id}.mp4"
                 drill_data[drill_type] = {
                     'title': drill,
-                    'clips': clips
+                    'video_url': video_url,
+                    'drill_id': drill_id,
+                    'activity_id': activity_id,
+                    'is_single_video': True
+                }
+            elif clips:
+                drill_data[drill_type] = {
+                    'title': drill,
+                    'clips': clips,
+                    'is_single_video': False
                 }
         
         if not drill_data:
@@ -619,7 +631,7 @@ def upload_selected_clips_to_gcs(assessment_id, player_name, drill_type, selecte
     except Exception as e:
         return None, f"Error uploading clips: {str(e)}"
 
-def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coach_feedback=""):
+def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coach_feedback="", defense_urls=[]):
     """Build Flyte task inputs based on drill type"""
     player_name_formatted = player_name.lower().replace(' ', '_')
     
@@ -654,6 +666,11 @@ def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coac
             'task_id': 'flyte.workflows.tasks.hold_your_pose_v2.get_hyp_metrics_v2',
             'launch_plan_id': 'flyte.workflows.tasks.hold_your_pose_v2.get_hyp_metrics_v2',
         },
+        'running_drill': {
+            'execution_name': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
+            'task_id': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
+            'launch_plan_id': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
+        },
     }
     
     config = drill_configs.get(drill_type, drill_configs['tophand'])
@@ -668,23 +685,45 @@ def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coac
         actual_drill_type = drill_type
         has_defense = False
     
-    inputs = {
-        "execution_name": config['execution_name'],
-        "task_id": config['task_id'],
-        "launch_plan_id": config['launch_plan_id'],
-        "wait_for_completion": False,
-        "inputs": {
-            "coach_feedback": coach_feedback,
-            "debug": False,
-            "player_name": player_name_formatted,
-            "videos": signed_urls,
-            "assessment_id": assessment_id
+    # Special handling for running_drill
+    if drill_type == 'running_drill':
+        inputs = {
+            "execution_name": config['execution_name'],
+            "task_id": config['task_id'],
+            "launch_plan_id": config['launch_plan_id'],
+            "wait_for_completion": False,
+            "inputs": {
+                "video_path": signed_urls[0] if isinstance(signed_urls, list) else signed_urls,
+                "player_name": player_name_formatted,
+                "assessment_id": assessment_id,
+                "gender": st.session_state.running_drill_inputs.get('gender', 'male'),
+                "category": st.session_state.running_drill_inputs.get('category', 'u19'),
+                "coach_feedback": coach_feedback,
+                "debug": False
+            }
         }
-    }
-    
-    if drill_type in ['tophand', 'bottomhand', 'backfoot_drive', 'backfoot_defense']:
-        inputs["inputs"]["drill_type"] = actual_drill_type
-        inputs["inputs"]["backfoot_defense_videos"] = []
+    else:
+        inputs = {
+            "execution_name": config['execution_name'],
+            "task_id": config['task_id'],
+            "launch_plan_id": config['launch_plan_id'],
+            "wait_for_completion": False,
+            "inputs": {
+                "coach_feedback": coach_feedback,
+                "debug": False,
+                "player_name": player_name_formatted,
+                "videos": signed_urls,
+                "assessment_id": assessment_id
+            }
+        }
+        
+        if drill_type in ['tophand', 'bottomhand', 'backfoot_drive', 'backfoot_defense']:
+            inputs["inputs"]["drill_type"] = actual_drill_type
+            # Add defense videos for backfoot_drive if provided
+            if drill_type == 'backfoot_drive':
+                inputs["inputs"]["backfoot_defense_videos"] = defense_urls if defense_urls else []
+            else:
+                inputs["inputs"]["backfoot_defense_videos"] = []
     
     return inputs
 
@@ -722,6 +761,12 @@ if 'original_values' not in st.session_state:
     st.session_state.original_values = {}
 if 'mongo_drill_keys' not in st.session_state:
     st.session_state.mongo_drill_keys = {}
+if 'defense_processed_clips' not in st.session_state:
+    st.session_state.defense_processed_clips = {}
+if 'defense_signed_urls' not in st.session_state:
+    st.session_state.defense_signed_urls = {}
+if 'running_drill_inputs' not in st.session_state:
+    st.session_state.running_drill_inputs = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -770,6 +815,8 @@ if search_button and assessment_id:
         st.session_state.edited_directions = {}
         st.session_state.original_values = {}
         st.session_state.mongo_drill_keys = {}
+        st.session_state.defense_processed_clips = {}
+        st.session_state.defense_signed_urls = {}
         st.success(f"Found assessment for {player_name}")
 
 # Display results
@@ -788,10 +835,16 @@ if st.session_state.searched:
         for idx, drill_type in enumerate(drill_types):
             with cols[idx % 4]:
                 drill_info = st.session_state.drill_data[drill_type]
-                num_clips = len(drill_info['clips'])
+                
+                # Different display for single video drills
+                if drill_info.get('is_single_video', False):
+                    button_text = f"🏃 {drill_type.title()}\n(Single Video)"
+                else:
+                    num_clips = len(drill_info.get('clips', []))
+                    button_text = f"📹 {drill_type.title()}\n({num_clips} clips)"
                 
                 if st.button(
-                    f"📹 {drill_type.title()}\n({num_clips} clips)",
+                    button_text,
                     key=f"drill_{drill_type}",
                     use_container_width=True
                 ):
@@ -805,61 +858,77 @@ if st.session_state.searched:
             
             st.subheader(f"Drill: {drill_info['title']}")
             
-            if not st.session_state.processed_clips:
-                processed_clips, error = download_and_process_clips(
-                    st.session_state.assessment_id,
-                    st.session_state.player_name,
-                    drill_type,
-                    drill_info['clips']
-                )
+            # Handle running_drill (single video) separately
+            if drill_info.get('is_single_video', False) and drill_type == 'running_drill':
+                st.write("**Original Video URL:**")
+                st.code(drill_info['video_url'])
                 
-                if error:
-                    st.error(error)
-                else:
-                    st.session_state.processed_clips = processed_clips
-                    st.success(f"Processed {len(processed_clips)} clips!")
-            
-            if st.session_state.processed_clips:
-                st.write(f"**Showing {len(st.session_state.processed_clips)} clips**")
-                
-                if drill_type not in st.session_state.selected_clips:
-                    st.session_state.selected_clips[drill_type] = []
-                
-                clips_to_show = st.session_state.processed_clips[:9]
-                
-                for row in range(0, len(clips_to_show), 3):
-                    cols = st.columns(3)
-                    
-                    for col_idx, clip_data in enumerate(clips_to_show[row:row+3]):
-                        clip_idx = row + col_idx
-                        with cols[col_idx]:
-                            is_selected = st.checkbox(
-                                f"Select Clip {clip_idx + 1}",
-                                value=clip_idx in st.session_state.selected_clips[drill_type],
-                                key=f"select_{drill_type}_{clip_idx}"
-                            )
-                            
-                            if is_selected and clip_idx not in st.session_state.selected_clips[drill_type]:
-                                st.session_state.selected_clips[drill_type].append(clip_idx)
-                            elif not is_selected and clip_idx in st.session_state.selected_clips[drill_type]:
-                                st.session_state.selected_clips[drill_type].remove(clip_idx)
-                            
-                            clip_name = clip_data['name']
-                            clip_bytes = clip_data['bytes']
-                            st.write(f"**Clip {clip_idx + 1}**")
-                            st.video(clip_bytes)
-                
-                if len(st.session_state.processed_clips) > 9:
-                    st.info(f"Showing first 9 of {len(st.session_state.processed_clips)} clips")
-                
-                # Flyte Task Workflow Section
                 st.divider()
-                st.subheader("🚀 Run Flyte Task")
+                st.subheader("🏃 Running Drill Configuration")
                 
-                num_selected = len(st.session_state.selected_clips.get(drill_type, []))
-                st.write(f"**Selected Clips:** {num_selected}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    gender = st.selectbox(
+                        "Gender",
+                        options=["male", "female"],
+                        key="running_gender"
+                    )
+                with col2:
+                    # Different categories for male and female
+                    if gender == "male":
+                        category_options = ["open", "u23", "u19", "u16", "u14"]
+                    else:
+                        category_options = ["open", "u23", "u19", "u15"]
+                    
+                    category = st.selectbox(
+                        "Category",
+                        options=category_options,
+                        key="running_category"
+                    )
                 
-                if num_selected > 0:
+                # Store in session state
+                st.session_state.running_drill_inputs['gender'] = gender
+                st.session_state.running_drill_inputs['category'] = category
+                
+                st.divider()
+                
+                # Download and process the video
+                if not st.session_state.processed_clips:
+                    with st.spinner('Downloading and processing running drill video...'):
+                        try:
+                            bucket_name, video_object_name = parse_gsutil_url(drill_info['video_url'])
+                            player_name = st.session_state.player_name.lower().replace(' ', '_')
+                            video_name = f"{player_name}_{drill_type}_video.{video_object_name.split('.')[-1]}"
+                            
+                            video_bytes = download_gcs_file_to_bytes(bucket_name, video_object_name)
+                            
+                            if video_bytes:
+                                processed_bytes = process_clip_to_bytes(video_bytes, video_name)
+                                
+                                if processed_bytes:
+                                    st.session_state.processed_clips = [{
+                                        'name': video_name,
+                                        'bytes': processed_bytes,
+                                        'original_url': drill_info['video_url']
+                                    }]
+                                    st.success("✅ Video processed successfully!")
+                                else:
+                                    st.error("Failed to process video")
+                            else:
+                                st.error("Failed to download video")
+                        except Exception as e:
+                            st.error(f"Error processing video: {str(e)}")
+                
+                # Display the processed video
+                if st.session_state.processed_clips:
+                    st.write("**Video Preview:**")
+                    video_data = st.session_state.processed_clips[0]
+                    st.video(video_data['bytes'])
+                    
+                    st.divider()
+                    st.subheader("🚀 Run Flyte Task")
+                    
+                    # Upload to GCS button
                     col1, col2 = st.columns([1, 3])
                     with col1:
                         upload_button = st.button(
@@ -870,19 +939,293 @@ if st.session_state.searched:
                         )
                     
                     if upload_button:
-                        signed_urls, error = upload_selected_clips_to_gcs(
-                            st.session_state.assessment_id,
-                            st.session_state.player_name,
-                            drill_type,
-                            st.session_state.selected_clips[drill_type],
-                            st.session_state.processed_clips
+                        # Upload the single video to GCS
+                        with st.spinner('Uploading video to GCS...'):
+                            try:
+                                player_name = st.session_state.player_name.lower().replace(' ', '_')
+                                folder_name = f"{GCS_PARENT_FOLDER_NAME}{player_name}_{st.session_state.assessment_id}/"
+                                create_gcs_folder(GCS_BUCKET_NAME, folder_name)
+                                
+                                # Save video bytes to temp file
+                                import tempfile
+                                with tempfile.NamedTemporaryFile(suffix=f'.{video_data["name"].split(".")[-1]}', delete=False) as temp_file:
+                                    temp_file.write(video_data['bytes'])
+                                    temp_file_path = temp_file.name
+                                
+                                try:
+                                    signed_url, public_url = upload_to_gcs(
+                                        GCS_BUCKET_NAME,
+                                        temp_file_path,
+                                        folder_name + video_data['name'],
+                                        signed_url_flag=True
+                                    )
+                                    st.session_state.signed_urls[drill_type] = [signed_url]
+                                    st.success(f"✅ Video uploaded to GCS!")
+                                finally:
+                                    if os.path.exists(temp_file_path):
+                                        os.unlink(temp_file_path)
+                                        
+                            except Exception as e:
+                                st.error(f"Error uploading video: {str(e)}")
+                    
+                    if drill_type in st.session_state.signed_urls:
+                        st.success(f"✅ Video uploaded to GCS")
+                        
+                        coach_feedback = st.text_area(
+                            "Coach Feedback (optional)",
+                            key=f"feedback_{drill_type}",
+                            placeholder="Enter any coach feedback here..."
                         )
                         
-                        if error:
-                            st.error(error)
-                        else:
-                            st.session_state.signed_urls[drill_type] = signed_urls
-                            st.success(f"✅ Uploaded {len(signed_urls)} clips to GCS!")
+                        # Use the uploaded signed URL
+                        flyte_inputs = build_flyte_inputs(
+                            drill_type,
+                            st.session_state.player_name,
+                            st.session_state.assessment_id,
+                            st.session_state.signed_urls[drill_type][0],  # Use the signed URL
+                            coach_feedback
+                        )
+                        
+                        st.write("**Flyte Task Inputs:**")
+                        st.json(flyte_inputs, expanded=False)
+                        
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            run_button = st.button(
+                                "▶️ Run Task",
+                                key=f"run_{drill_type}",
+                                use_container_width=True,
+                                disabled=drill_type in st.session_state.execution_ids
+                            )
+                        
+                        if run_button:
+                            with st.spinner("Submitting task..."):
+                                try:
+                                    response = run_task(flyte_inputs)
+                                    execution_id = response.get("execution_id")
+                                    st.session_state.execution_ids[drill_type] = execution_id
+                                    st.session_state.task_status[drill_type] = {
+                                        "execution_id": execution_id,
+                                        "status": "submitted",
+                                        "is_done": False
+                                    }
+                                    st.success(f"✅ Task submitted! Execution ID: {execution_id}")
+                                except Exception as e:
+                                    st.error(f"Error running task: {str(e)}")
+                        
+                        if drill_type in st.session_state.execution_ids:
+                            st.divider()
+                            st.subheader("📊 Task Status")
+                            
+                            execution_id = st.session_state.execution_ids[drill_type]
+                            st.write(f"**Execution ID:** `{execution_id}`")
+                            
+                            col1, col2 = st.columns([1, 3])
+                            with col1:
+                                check_status_button = st.button(
+                                    "🔄 Check Status",
+                                    key=f"status_{drill_type}",
+                                    use_container_width=True
+                                )
+                            
+                            if check_status_button:
+                                with st.spinner("Fetching status..."):
+                                    try:
+                                        status_response = fetch_task_execution_post({"execution_id": execution_id})
+                                        st.session_state.task_status[drill_type] = status_response
+                                    except Exception as e:
+                                        st.error(f"Error fetching status: {str(e)}")
+                            
+                            if drill_type in st.session_state.task_status:
+                                status_data = st.session_state.task_status[drill_type]
+                                is_done = status_data.get("is_done", False)
+                                
+                                if is_done:
+                                    st.success("✅ Task Completed!")
+                                else:
+                                    st.info("⏳ Task In Progress...")
+                                
+                                with st.expander("View Full Status", expanded=is_done):
+                                    st.json(status_data)
+                    else:
+                        st.info("👆 Click 'Upload to GCS' to proceed")
+            
+            # Handle regular multi-clip drills
+            elif not drill_info.get('is_single_video', False):
+                if not st.session_state.processed_clips:
+                    processed_clips, error = download_and_process_clips(
+                        st.session_state.assessment_id,
+                        st.session_state.player_name,
+                        drill_type,
+                        drill_info['clips']
+                    )
+                    
+                    if error:
+                        st.error(error)
+                    else:
+                        st.session_state.processed_clips = processed_clips
+                        st.success(f"Processed {len(processed_clips)} clips!")
+                
+                if st.session_state.processed_clips:
+                    st.write(f"**Showing {len(st.session_state.processed_clips)} clips**")
+                    
+                    if drill_type not in st.session_state.selected_clips:
+                        st.session_state.selected_clips[drill_type] = []
+                    
+                    clips_to_show = st.session_state.processed_clips[:12]
+                    
+                    for row in range(0, len(clips_to_show), 3):
+                        cols = st.columns(3)
+                        
+                        for col_idx, clip_data in enumerate(clips_to_show[row:row+3]):
+                            clip_idx = row + col_idx
+                            with cols[col_idx]:
+                                is_selected = st.checkbox(
+                                    f"Select Clip {clip_idx + 1}",
+                                    value=clip_idx in st.session_state.selected_clips[drill_type],
+                                    key=f"select_{drill_type}_{clip_idx}"
+                                )
+                                
+                                if is_selected and clip_idx not in st.session_state.selected_clips[drill_type]:
+                                    st.session_state.selected_clips[drill_type].append(clip_idx)
+                                elif not is_selected and clip_idx in st.session_state.selected_clips[drill_type]:
+                                    st.session_state.selected_clips[drill_type].remove(clip_idx)
+                                
+                                clip_name = clip_data['name']
+                                clip_bytes = clip_data['bytes']
+                                st.write(f"**Clip {clip_idx + 1}**")
+                                st.video(clip_bytes)
+                    
+                    if len(st.session_state.processed_clips) > 12:
+                        st.info(f"Showing first 12 of {len(st.session_state.processed_clips)} clips")
+                    
+                    # Flyte Task Workflow Section
+                    st.divider()
+                    st.subheader("🚀 Run Flyte Task")
+                    
+                    num_selected = len(st.session_state.selected_clips.get(drill_type, []))
+                    st.write(f"**Selected Clips:** {num_selected}")
+                    
+                    if num_selected > 0:
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            upload_button = st.button(
+                                "☁️ Upload to GCS",
+                                key=f"upload_{drill_type}",
+                                use_container_width=True,
+                                disabled=drill_type in st.session_state.signed_urls
+                            )
+                        
+                        if upload_button:
+                            signed_urls, error = upload_selected_clips_to_gcs(
+                                st.session_state.assessment_id,
+                                st.session_state.player_name,
+                                drill_type,
+                                st.session_state.selected_clips[drill_type],
+                                st.session_state.processed_clips
+                            )
+                            
+                            if error:
+                                st.error(error)
+                            else:
+                                st.session_state.signed_urls[drill_type] = signed_urls
+                                st.success(f"✅ Uploaded {len(signed_urls)} clips to GCS!")
+                    
+                    # Check for backfoot defense clips if this is backfoot_drive
+                    if drill_type == 'backfoot_drive' and drill_type in st.session_state.signed_urls:
+                        has_defense = 'backfoot_defense' in st.session_state.drill_data
+                        
+                        if has_defense:
+                            st.divider()
+                            st.subheader("🛡️ Backfoot Defense Clips")
+                            st.info("ℹ️ Backfoot defense clips are available. You can optionally select them to include in the task.")
+                            
+                            # Load defense clips if not already loaded
+                            defense_key = f"{st.session_state.assessment_id}_backfoot_defense"
+                            if defense_key not in st.session_state.defense_processed_clips:
+                                load_defense = st.button("📥 Load Defense Clips", key="load_defense_clips")
+                                
+                                if load_defense:
+                                    with st.spinner("Loading defense clips..."):
+                                        defense_drill_info = st.session_state.drill_data['backfoot_defense']
+                                        defense_clips, error = download_and_process_clips(
+                                            st.session_state.assessment_id,
+                                            st.session_state.player_name,
+                                            'backfoot_defense',
+                                            defense_drill_info['clips']
+                                        )
+                                        
+                                        if error:
+                                            st.error(error)
+                                        else:
+                                            st.session_state.defense_processed_clips[defense_key] = defense_clips
+                                            st.rerun()
+                            
+                            # Display defense clips if loaded
+                            if defense_key in st.session_state.defense_processed_clips:
+                                defense_clips = st.session_state.defense_processed_clips[defense_key]
+                                st.write(f"**Defense Clips Available:** {len(defense_clips)}")
+                                
+                                # Initialize selected defense clips
+                                if 'backfoot_defense' not in st.session_state.selected_clips:
+                                    st.session_state.selected_clips['backfoot_defense'] = []
+                                
+                                defense_clips_to_show = defense_clips[:12]
+                                
+                                for row in range(0, len(defense_clips_to_show), 3):
+                                    cols = st.columns(3)
+                                    
+                                    for col_idx, clip_data in enumerate(defense_clips_to_show[row:row+3]):
+                                        clip_idx = row + col_idx
+                                        with cols[col_idx]:
+                                            is_selected = st.checkbox(
+                                                f"Select Defense Clip {clip_idx + 1}",
+                                                value=clip_idx in st.session_state.selected_clips['backfoot_defense'],
+                                                key=f"select_defense_{clip_idx}"
+                                            )
+                                            
+                                            if is_selected and clip_idx not in st.session_state.selected_clips['backfoot_defense']:
+                                                st.session_state.selected_clips['backfoot_defense'].append(clip_idx)
+                                            elif not is_selected and clip_idx in st.session_state.selected_clips['backfoot_defense']:
+                                                st.session_state.selected_clips['backfoot_defense'].remove(clip_idx)
+                                            
+                                            st.write(f"**Defense Clip {clip_idx + 1}**")
+                                            st.video(clip_data['bytes'])
+                                
+                                if len(defense_clips) > 12:
+                                    st.info(f"Showing first 12 of {len(defense_clips)} defense clips")
+                                
+                                # Upload defense clips
+                                num_defense_selected = len(st.session_state.selected_clips.get('backfoot_defense', []))
+                                st.write(f"**Selected Defense Clips:** {num_defense_selected}")
+                                
+                                if num_defense_selected > 0:
+                                    col1, col2 = st.columns([1, 3])
+                                    with col1:
+                                        upload_defense_button = st.button(
+                                            "☁️ Upload Defense to GCS",
+                                            key="upload_defense",
+                                            use_container_width=True,
+                                            disabled=drill_type in st.session_state.defense_signed_urls
+                                        )
+                                    
+                                    if upload_defense_button:
+                                        defense_urls, error = upload_selected_clips_to_gcs(
+                                            st.session_state.assessment_id,
+                                            st.session_state.player_name,
+                                            'backfoot_defense',
+                                            st.session_state.selected_clips['backfoot_defense'],
+                                            defense_clips
+                                        )
+                                        
+                                        if error:
+                                            st.error(error)
+                                        else:
+                                            st.session_state.defense_signed_urls[drill_type] = defense_urls
+                                            st.success(f"✅ Uploaded {len(defense_urls)} defense clips to GCS!")
+                                    
+                                    if drill_type in st.session_state.defense_signed_urls:
+                                        st.success(f"✅ {len(st.session_state.defense_signed_urls[drill_type])} defense clips uploaded to GCS")
                     
                     if drill_type in st.session_state.signed_urls:
                         st.success(f"✅ {len(st.session_state.signed_urls[drill_type])} clips uploaded to GCS")
@@ -893,15 +1236,26 @@ if st.session_state.searched:
                             placeholder="Enter any coach feedback here..."
                         )
                         
+                        # Get defense URLs if available for backfoot_drive
+                        defense_urls = []
+                        if drill_type == 'backfoot_drive' and drill_type in st.session_state.defense_signed_urls:
+                            defense_urls = st.session_state.defense_signed_urls[drill_type]
+                        
                         flyte_inputs = build_flyte_inputs(
                             drill_type,
                             st.session_state.player_name,
                             st.session_state.assessment_id,
                             st.session_state.signed_urls[drill_type],
-                            coach_feedback
+                            coach_feedback,
+                            defense_urls
                         )
                         
                         st.write("**Flyte Task Inputs:**")
+                        if drill_type == 'backfoot_drive':
+                            if defense_urls:
+                                st.info(f"ℹ️ Task includes {len(st.session_state.signed_urls[drill_type])} drive clips and {len(defense_urls)} defense clips")
+                            else:
+                                st.info(f"ℹ️ Task includes {len(st.session_state.signed_urls[drill_type])} drive clips (no defense clips)")
                         st.json(flyte_inputs, expanded=False)
                         
                         col1, col2 = st.columns([1, 3])
@@ -1237,8 +1591,11 @@ with st.sidebar:
         st.session_state.edited_directions = {}
         st.session_state.original_values = {}
         st.session_state.mongo_drill_keys = {}
+        st.session_state.defense_processed_clips = {}
+        st.session_state.defense_signed_urls = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
