@@ -481,6 +481,51 @@ def update_drill_results_in_mongo(assessment_id, drill_type, updated_metrics):
         print(f"Error updating drill results: {e}")
         return False
 
+def get_mongo_drill_key(drill_type):
+    """Map UI drill type to MongoDB drill type key"""
+    drill_type_mapping = {
+        'tophand': 'top_hand',
+        'bottomhand': 'bottom_hand',
+        'backfoot_drive': 'backfoot',
+        'backfoot_defense': 'backfoot_defense',
+        'power_hitting': 'power_hitting',
+        'hold_your_pose': 'hold_your_pose',
+        'running_drill': 'running_drill',
+        'feet_planted': 'feet_planted'
+    }
+    return drill_type_mapping.get(drill_type, drill_type)
+
+def save_coach_feedback_to_mongo(assessment_id, drill_type, coach_feedback):
+    """Save only coach feedback to MongoDB for a specific drill"""
+    try:
+        mongo_drill_key = get_mongo_drill_key(drill_type)
+        search_query = {"assessment_id": assessment_id}
+        update_query = {
+            "$set": {
+                f"drill_metrics.{mongo_drill_key}.coach_feedback": coach_feedback
+            }
+        }
+        result = drills_collection.update_one(search_query, update_query, upsert=True)
+        return result.modified_count > 0 or result.upserted_id is not None
+    except Exception as e:
+        print(f"Error saving coach feedback: {e}")
+        return False
+
+def get_coach_feedback_from_mongo(assessment_id, drill_type):
+    """Get coach feedback from MongoDB for a specific drill"""
+    try:
+        mongo_drill_key = get_mongo_drill_key(drill_type)
+        search_query = {"assessment_id": assessment_id}
+        drill_doc = drills_collection.find_one(search_query)
+        if drill_doc and 'drill_metrics' in drill_doc:
+            drill_metrics = drill_doc['drill_metrics']
+            if mongo_drill_key in drill_metrics:
+                return drill_metrics[mongo_drill_key].get('coach_feedback', '')
+        return ''
+    except Exception as e:
+        print(f"Error fetching coach feedback: {e}")
+        return ''
+
 def search_assessment(assessment_id):
     """Search for player and drills by assessment ID"""
     try:
@@ -767,6 +812,8 @@ if 'defense_signed_urls' not in st.session_state:
     st.session_state.defense_signed_urls = {}
 if 'running_drill_inputs' not in st.session_state:
     st.session_state.running_drill_inputs = {}
+if 'saved_coach_feedback' not in st.session_state:
+    st.session_state.saved_coach_feedback = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -817,6 +864,7 @@ if search_button and assessment_id:
         st.session_state.mongo_drill_keys = {}
         st.session_state.defense_processed_clips = {}
         st.session_state.defense_signed_urls = {}
+        st.session_state.saved_coach_feedback = {}
         st.success(f"Found assessment for {player_name}")
 
 # Display results
@@ -925,6 +973,51 @@ if st.session_state.searched:
                     video_data = st.session_state.processed_clips[0]
                     st.video(video_data['bytes'])
                     
+                    # Coach Feedback Section for Running Drill
+                    st.divider()
+                    st.subheader("📝 Coach Feedback (Optional)")
+                    
+                    # Load saved coach feedback from MongoDB if not already in session
+                    feedback_key = f"{st.session_state.assessment_id}_{drill_type}"
+                    if feedback_key not in st.session_state.saved_coach_feedback:
+                        saved_feedback = get_coach_feedback_from_mongo(st.session_state.assessment_id, drill_type)
+                        st.session_state.saved_coach_feedback[feedback_key] = saved_feedback
+                    
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        coach_feedback_early_running = st.text_area(
+                            "Enter coach feedback for this drill",
+                            value=st.session_state.saved_coach_feedback.get(feedback_key, ''),
+                            key=f"early_feedback_{drill_type}",
+                            placeholder="Enter any coach feedback here...",
+                            height=100
+                        )
+                    
+                    with col2:
+                        st.write("")
+                        st.write("")
+                        save_feedback_button_running = st.button(
+                            "💾 Save Feedback",
+                            key=f"save_feedback_{drill_type}",
+                            use_container_width=True
+                        )
+                    
+                    if save_feedback_button_running:
+                        with st.spinner("Saving coach feedback to MongoDB..."):
+                            success = save_coach_feedback_to_mongo(
+                                st.session_state.assessment_id,
+                                drill_type,
+                                coach_feedback_early_running
+                            )
+                            if success:
+                                st.session_state.saved_coach_feedback[feedback_key] = coach_feedback_early_running
+                                st.success("✅ Coach feedback saved to MongoDB!")
+                            else:
+                                st.error("❌ Failed to save coach feedback")
+                    
+                    if st.session_state.saved_coach_feedback.get(feedback_key, ''):
+                        st.info(f"💾 Saved feedback: {st.session_state.saved_coach_feedback[feedback_key][:100]}...")
+                    
                     st.divider()
                     st.subheader("🚀 Run Flyte Task")
                     
@@ -971,11 +1064,19 @@ if st.session_state.searched:
                     if drill_type in st.session_state.signed_urls:
                         st.success(f"✅ Video uploaded to GCS")
                         
+                        # Auto-populate coach feedback from saved feedback
+                        feedback_key = f"{st.session_state.assessment_id}_{drill_type}"
+                        default_feedback = st.session_state.saved_coach_feedback.get(feedback_key, '')
+                        
                         coach_feedback = st.text_area(
                             "Coach Feedback (optional)",
+                            value=default_feedback,
                             key=f"feedback_{drill_type}",
                             placeholder="Enter any coach feedback here..."
                         )
+                        
+                        if default_feedback:
+                            st.info("ℹ️ Coach feedback auto-populated from saved feedback")
                         
                         # Use the uploaded signed URL
                         flyte_inputs = build_flyte_inputs(
@@ -1068,6 +1169,53 @@ if st.session_state.searched:
                 
                 if st.session_state.processed_clips:
                     st.write(f"**Showing {len(st.session_state.processed_clips)} clips**")
+                    
+                    # Coach Feedback Section - Before Clip Selection
+                    st.divider()
+                    st.subheader("📝 Coach Feedback (Optional)")
+                    
+                    # Load saved coach feedback from MongoDB if not already in session
+                    feedback_key = f"{st.session_state.assessment_id}_{drill_type}"
+                    if feedback_key not in st.session_state.saved_coach_feedback:
+                        saved_feedback = get_coach_feedback_from_mongo(st.session_state.assessment_id, drill_type)
+                        st.session_state.saved_coach_feedback[feedback_key] = saved_feedback
+                    
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        coach_feedback_early = st.text_area(
+                            "Enter coach feedback for this drill",
+                            value=st.session_state.saved_coach_feedback.get(feedback_key, ''),
+                            key=f"early_feedback_{drill_type}",
+                            placeholder="Enter any coach feedback here...",
+                            height=100
+                        )
+                    
+                    with col2:
+                        st.write("")
+                        st.write("")
+                        save_feedback_button = st.button(
+                            "💾 Save Feedback",
+                            key=f"save_feedback_{drill_type}",
+                            use_container_width=True
+                        )
+                    
+                    if save_feedback_button:
+                        with st.spinner("Saving coach feedback to MongoDB..."):
+                            success = save_coach_feedback_to_mongo(
+                                st.session_state.assessment_id,
+                                drill_type,
+                                coach_feedback_early
+                            )
+                            if success:
+                                st.session_state.saved_coach_feedback[feedback_key] = coach_feedback_early
+                                st.success("✅ Coach feedback saved to MongoDB!")
+                            else:
+                                st.error("❌ Failed to save coach feedback")
+                    
+                    if st.session_state.saved_coach_feedback.get(feedback_key, ''):
+                        st.info(f"💾 Saved feedback: {st.session_state.saved_coach_feedback[feedback_key][:100]}...")
+                    
+                    st.divider()
                     
                     if drill_type not in st.session_state.selected_clips:
                         st.session_state.selected_clips[drill_type] = []
@@ -1230,11 +1378,19 @@ if st.session_state.searched:
                     if drill_type in st.session_state.signed_urls:
                         st.success(f"✅ {len(st.session_state.signed_urls[drill_type])} clips uploaded to GCS")
                         
+                        # Auto-populate coach feedback from saved feedback
+                        feedback_key = f"{st.session_state.assessment_id}_{drill_type}"
+                        default_feedback = st.session_state.saved_coach_feedback.get(feedback_key, '')
+                        
                         coach_feedback = st.text_area(
                             "Coach Feedback (optional)",
+                            value=default_feedback,
                             key=f"feedback_{drill_type}",
                             placeholder="Enter any coach feedback here..."
                         )
+                        
+                        if default_feedback:
+                            st.info("ℹ️ Coach feedback auto-populated from saved feedback")
                         
                         # Get defense URLs if available for backfoot_drive
                         defense_urls = []
@@ -1322,16 +1478,6 @@ if st.session_state.searched:
                                     st.divider()
                                     st.subheader("✏️ Edit Metrics")
                                     
-                                    # Map drill types to MongoDB keys
-                                    drill_type_mapping = {
-                                        'tophand': 'top_hand',
-                                        'bottomhand': 'bottom_hand',
-                                        'backfoot_drive': 'backfoot',
-                                        'backfoot_defense': 'backfoot',
-                                        'power_hitting': 'power_hitting',
-                                        'hold_your_pose': 'hold_your_pose'
-                                    }
-                                    
                                     # Fetch drill results from MongoDB
                                     metrics_key = f"{st.session_state.assessment_id}_{drill_type}"
                                     
@@ -1346,8 +1492,8 @@ if st.session_state.searched:
                                                 available_drills = list(drill_metrics.keys())
                                                 st.info(f"📋 Available drills in MongoDB: {', '.join(available_drills)}")
                                                 
-                                                # Try to find the drill using mapping
-                                                mongo_drill_key = drill_type_mapping.get(drill_type, drill_type)
+                                                # Get MongoDB drill key using the mapping function
+                                                mongo_drill_key = get_mongo_drill_key(drill_type)
                                                 
                                                 # Also try alternate keys
                                                 possible_keys = [mongo_drill_key, drill_type]
@@ -1532,12 +1678,13 @@ with st.sidebar:
     2. View player information
     3. Browse available drill types
     4. View drill clips in a grid
-    5. Select clips for Flyte tasks
-    6. Upload clips to GCS
-    7. Run Flyte tasks with custom inputs
-    8. Monitor task execution status
-    9. Edit shot angles and ball directions (drive drills)
-    10. Auto-recalculate metrics and save to MongoDB
+    5. Add and save coach feedback (before clip selection)
+    6. Select clips for Flyte tasks
+    7. Upload clips to GCS
+    8. Run Flyte tasks with custom inputs (auto-populates saved feedback)
+    9. Monitor task execution status
+    10. Edit shot angles and ball directions (drive drills)
+    11. Auto-recalculate metrics and save to MongoDB
     """)
     
     if st.session_state.searched:
@@ -1593,6 +1740,7 @@ with st.sidebar:
         st.session_state.mongo_drill_keys = {}
         st.session_state.defense_processed_clips = {}
         st.session_state.defense_signed_urls = {}
+        st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
 
