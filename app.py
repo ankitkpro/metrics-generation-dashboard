@@ -43,6 +43,7 @@ users_collection = db['users']
 # GCS UTILITY FUNCTIONS
 # ============================================================================
 
+
 def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
     try:
@@ -715,6 +716,11 @@ def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coac
             'execution_name': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
             'task_id': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
             'launch_plan_id': 'flyte.workflows.tasks.running_drill_v2.generate_run3_metrics_v2',
+        },
+        'feet_planted': {
+            'execution_name': 'flyte.workflows.tasks.feet_planted_v2.get_feet_planted_metrics_v2',
+            'task_id': 'flyte.workflows.tasks.feet_planted_v2.get_feet_planted_metrics_v2',
+            'launch_plan_id': 'flyte.workflows.tasks.feet_planted_v2.get_feet_planted_metrics_v2',
         },
     }
     
@@ -1743,4 +1749,5 @@ with st.sidebar:
         st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
