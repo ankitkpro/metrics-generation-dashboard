@@ -510,6 +510,7 @@ def save_coach_feedback_to_mongo(assessment_id, drill_type, coach_feedback):
         return result.modified_count > 0 or result.upserted_id is not None
     except Exception as e:
         print(f"Error saving coach feedback: {e}")
+        st.error(f"Error saving coach feedback: {e}")
         return False
 
 def get_coach_feedback_from_mongo(assessment_id, drill_type):
@@ -1749,5 +1750,6 @@ with st.sidebar:
         st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
