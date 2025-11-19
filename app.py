@@ -39,6 +39,12 @@ db = client['kpro']
 gallery_collection = db['gallery']
 users_collection = db['users']
 
+
+# MongoDB staging connection for drill results
+staging_connection_string = 'mongodb+srv://aman:N3cLLYBTrKMTElAS@kpro-staging.f3esdpg.mongodb.net/'
+staging_client = MongoClient(staging_connection_string)
+staging_db = staging_client['kpro']
+drills_collection = staging_db['drill_results']
 # ============================================================================
 # GCS UTILITY FUNCTIONS
 # ============================================================================
@@ -1750,6 +1756,7 @@ with st.sidebar:
         st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
