@@ -454,7 +454,9 @@ def recalculate_metrics(metrics, shot_direction_angles, ball_directions, batter_
     final_metrics = metrics['new_metrics']
     drill_type = metrics.get('drill_type', '')
     score_metrics = get_score_metrics(final_metrics, drill_type)
-    metrics['insights'] = score_metrics.get('insights', {})
+    # If metrics['insights'] is str then skip updating insights
+    if not isinstance(metrics['insights'], str):
+        metrics['insights'] = score_metrics.get('insights', {})
     metrics['percentile'] = score_metrics['percentile']
     metrics['grade'] = score_metrics['grade']
 
@@ -1757,6 +1759,7 @@ with st.sidebar:
         st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
