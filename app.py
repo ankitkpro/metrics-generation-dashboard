@@ -1236,7 +1236,7 @@ if st.session_state.searched:
                     if drill_type not in st.session_state.selected_clips:
                         st.session_state.selected_clips[drill_type] = []
                     
-                    clips_to_show = st.session_state.processed_clips[:12]
+                    clips_to_show = st.session_state.processed_clips[:18]
                     
                     for row in range(0, len(clips_to_show), 3):
                         cols = st.columns(3)
@@ -1260,8 +1260,8 @@ if st.session_state.searched:
                                 st.write(f"**Clip {clip_idx + 1}**")
                                 st.video(clip_bytes)
                     
-                    if len(st.session_state.processed_clips) > 12:
-                        st.info(f"Showing first 12 of {len(st.session_state.processed_clips)} clips")
+                    if len(st.session_state.processed_clips) > 18:
+                        st.info(f"Showing first 18 of {len(st.session_state.processed_clips)} clips")
                     
                     # Flyte Task Workflow Section
                     st.divider()
@@ -1334,7 +1334,7 @@ if st.session_state.searched:
                                 if 'backfoot_defense' not in st.session_state.selected_clips:
                                     st.session_state.selected_clips['backfoot_defense'] = []
                                 
-                                defense_clips_to_show = defense_clips[:12]
+                                defense_clips_to_show = defense_clips[:18]
                                 
                                 for row in range(0, len(defense_clips_to_show), 3):
                                     cols = st.columns(3)
@@ -1356,8 +1356,8 @@ if st.session_state.searched:
                                             st.write(f"**Defense Clip {clip_idx + 1}**")
                                             st.video(clip_data['bytes'])
                                 
-                                if len(defense_clips) > 12:
-                                    st.info(f"Showing first 12 of {len(defense_clips)} defense clips")
+                                if len(defense_clips) > 18:
+                                    st.info(f"Showing first 18 of {len(defense_clips)} defense clips")
                                 
                                 # Upload defense clips
                                 num_defense_selected = len(st.session_state.selected_clips.get('backfoot_defense', []))
@@ -1759,6 +1759,7 @@ with st.sidebar:
         st.session_state.saved_coach_feedback = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
 
 
