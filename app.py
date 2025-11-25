@@ -2,7 +2,10 @@ import streamlit as st
 from pymongo import MongoClient
 import os
 import tempfile
-import moviepy as mp
+try:
+    from moviepy.editor import VideoFileClip
+except:
+    from moviepy import VideoFileClip
 from google.cloud import storage
 from datetime import timedelta
 import json
@@ -46,10 +49,10 @@ staging_connection_string = st.secrets["MONGO_CONNECTION_STRING_STAGING"]
 staging_client = MongoClient(staging_connection_string)
 staging_db = staging_client['kpro']
 drills_collection = staging_db['drill_results']
+
 # ============================================================================
 # GCS UTILITY FUNCTIONS
 # ============================================================================
-
 
 def get_gcs_client():
     """Get authenticated GCS client using service account credentials"""
@@ -105,7 +108,50 @@ def download_gcs_file_to_bytes(bucket_name, blob_name):
         print(f"Error downloading GCS file: {e}")
         return None
 
+
 def upload_to_gcs(bucket_name, source_file_name, destination_blob_name, signed_url_flag=False):
+    """
+    Uploads a file to GCS. If a file with the same name exists, it will be replaced.
+    Returns the public URL or (signed_url, public_url) if signed_url_flag=True.
+
+    Args:
+        bucket_name (str): GCS bucket name.
+        source_file_name (str): Local path to file.
+        destination_blob_name (str): Blob name in GCS.
+        signed_url_flag (bool): If True, also return a signed url.
+
+    Returns:
+        str or tuple: Public url, or (signed_url, public_url) if signed_url_flag=True.
+    """
+    try:
+        storage_client = get_gcs_client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(destination_blob_name)
+
+        # Always upload/replace with the new file.
+        blob.upload_from_filename(source_file_name)
+        print(f"File {source_file_name} uploaded (and replaced if existed) to gs://{bucket_name}/{destination_blob_name}.")
+
+        public_url = blob.public_url
+
+        if signed_url_flag:
+            try:
+                signed_url = blob.generate_signed_url(expiration=timedelta(days=7))
+                print(f"Signed URL: {signed_url}")
+                return signed_url, public_url
+            except Exception as e:
+                print(f"Could not generate signed URL: {e}")
+                return public_url
+        else:
+            print(f"Public URL: {public_url}")
+            return public_url
+
+    except Exception as e:
+        print(f"Error uploading/replacing file to GCS: {e}")
+        return None
+
+
+def upload_to_gcs_without_replace(bucket_name, source_file_name, destination_blob_name, signed_url_flag=False):
     """
     Uploads a file to GCS bucket and returns its public URL.
     
@@ -240,6 +286,10 @@ def fetch_task_execution_post(payload: Dict[str, Any], timeout_s: int = 60) -> D
 
 def process_clip_to_bytes(video_bytes, clip_name):
     """Process video bytes to make them playable in browser"""
+    temp_input_path = None
+    temp_output_path = None
+    clip = None
+    
     try:
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
             temp_input.write(video_bytes)
@@ -248,24 +298,166 @@ def process_clip_to_bytes(video_bytes, clip_name):
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
             temp_output_path = temp_output.name
         
-        try:
-            clip = mp.VideoFileClip(temp_input_path)
-            clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
-            clip.close()
-            
-            with open(temp_output_path, 'rb') as f:
-                processed_bytes = f.read()
-            
-            return processed_bytes
-        finally:
-            if os.path.exists(temp_input_path):
-                os.unlink(temp_input_path)
-            if os.path.exists(temp_output_path):
-                os.unlink(temp_output_path)
-                
+        clip = VideoFileClip(temp_input_path)
+        clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
+        clip.close()
+        clip = None
+        
+        # Small delay to ensure file handles are released on Windows
+        time.sleep(0.1)
+        
+        with open(temp_output_path, 'rb') as f:
+            processed_bytes = f.read()
+        
+        return processed_bytes
+        
     except Exception as e:
         print(f"Error processing clip {clip_name}: {e}")
         return None
+    
+    finally:
+        # Ensure clip is closed
+        try:
+            if clip is not None:
+                clip.close()
+        except:
+            pass
+        
+        # Small delay before cleanup
+        time.sleep(0.1)
+        
+        # Clean up temp files
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp input file: {e}")
+        
+        if temp_output_path and os.path.exists(temp_output_path):
+            try:
+                os.unlink(temp_output_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp output file: {e}")
+
+def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
+    """Create a clip from video bytes using start and end times (in seconds)"""
+    temp_input_path = None
+    temp_output_path = None
+    video = None
+    clip = None
+    
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
+            temp_input.write(video_bytes)
+            temp_input_path = temp_input.name
+        
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
+            temp_output_path = temp_output.name
+        
+        video = VideoFileClip(temp_input_path)
+        
+        # Validate times
+        if start_time < 0:
+            start_time = 0
+        if end_time > video.duration:
+            end_time = video.duration
+        if start_time >= end_time:
+            video.close()
+            raise ValueError(f"Start time ({start_time}) must be less than end time ({end_time})")
+        
+        # Create subclip
+        clip = video.subclip(start_time, end_time)
+        clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
+        
+        # Close video objects before reading output
+        clip.close()
+        video.close()
+        clip = None
+        video = None
+        
+        # Small delay to ensure file handles are released on Windows
+        time.sleep(0.1)
+        
+        with open(temp_output_path, 'rb') as f:
+            clip_bytes = f.read()
+        
+        return clip_bytes
+        
+    except Exception as e:
+        print(f"Error creating clip {clip_name}: {e}")
+        return None
+    
+    finally:
+        # Ensure all video objects are closed
+        try:
+            if clip is not None:
+                clip.close()
+        except:
+            pass
+        
+        try:
+            if video is not None:
+                video.close()
+        except:
+            pass
+        
+        # Small delay before cleanup
+        time.sleep(0.1)
+        
+        # Clean up temp files
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp input file: {e}")
+        
+        if temp_output_path and os.path.exists(temp_output_path):
+            try:
+                os.unlink(temp_output_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp output file: {e}")
+
+def get_video_duration(video_bytes):
+    """Get duration of video in seconds"""
+    temp_input_path = None
+    video = None
+    
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
+            temp_input.write(video_bytes)
+            temp_input_path = temp_input.name
+        
+        video = VideoFileClip(temp_input_path)
+        duration = video.duration
+        video.close()
+        video = None
+        
+        # Small delay to ensure file handles are released on Windows
+        time.sleep(0.1)
+        
+        return duration
+        
+    except Exception as e:
+        print(f"Error getting video duration: {e}")
+        return None
+    
+    finally:
+        # Ensure video is closed
+        try:
+            if video is not None:
+                video.close()
+        except:
+            pass
+        
+        # Small delay before cleanup
+        time.sleep(0.1)
+        
+        # Clean up temp file
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp file: {e}")
 
 # ============================================================================
 # SCORING & METRICS FUNCTIONS
@@ -454,9 +646,13 @@ def recalculate_metrics(metrics, shot_direction_angles, ball_directions, batter_
     final_metrics = metrics['new_metrics']
     drill_type = metrics.get('drill_type', '')
     score_metrics = get_score_metrics(final_metrics, drill_type)
+
     # If metrics['insights'] is str then skip updating insights
     if not isinstance(metrics['insights'], str):
         metrics['insights'] = score_metrics.get('insights', {})
+
+
+    # metrics['insights'] = score_metrics.get('insights', {})
     metrics['percentile'] = score_metrics['percentile']
     metrics['grade'] = score_metrics['grade']
 
@@ -519,7 +715,6 @@ def save_coach_feedback_to_mongo(assessment_id, drill_type, coach_feedback):
         return result.modified_count > 0 or result.upserted_id is not None
     except Exception as e:
         print(f"Error saving coach feedback: {e}")
-        st.error(f"Error saving coach feedback: {e}")
         return False
 
 def get_coach_feedback_from_mongo(assessment_id, drill_type):
@@ -830,6 +1025,22 @@ if 'running_drill_inputs' not in st.session_state:
     st.session_state.running_drill_inputs = {}
 if 'saved_coach_feedback' not in st.session_state:
     st.session_state.saved_coach_feedback = {}
+if 'manual_clipping_mode' not in st.session_state:
+    st.session_state.manual_clipping_mode = {}
+if 'raw_video_data' not in st.session_state:
+    st.session_state.raw_video_data = {}
+if 'num_manual_clips' not in st.session_state:
+    st.session_state.num_manual_clips = {}
+if 'manual_clip_times' not in st.session_state:
+    st.session_state.manual_clip_times = {}
+if 'manual_clips_created' not in st.session_state:
+    st.session_state.manual_clips_created = {}
+if 'clip_selection_mode' not in st.session_state:
+    st.session_state.clip_selection_mode = {}
+if 'auto_clips_cache' not in st.session_state:
+    st.session_state.auto_clips_cache = {}
+if 'manual_clips_cache' not in st.session_state:
+    st.session_state.manual_clips_cache = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -881,6 +1092,14 @@ if search_button and assessment_id:
         st.session_state.defense_processed_clips = {}
         st.session_state.defense_signed_urls = {}
         st.session_state.saved_coach_feedback = {}
+        st.session_state.manual_clipping_mode = {}
+        st.session_state.raw_video_data = {}
+        st.session_state.num_manual_clips = {}
+        st.session_state.manual_clip_times = {}
+        st.session_state.manual_clips_created = {}
+        st.session_state.clip_selection_mode = {}
+        st.session_state.auto_clips_cache = {}
+        st.session_state.manual_clips_cache = {}
         st.success(f"Found assessment for {player_name}")
 
 # Display results
@@ -913,7 +1132,11 @@ if st.session_state.searched:
                     use_container_width=True
                 ):
                     st.session_state.selected_drill = drill_type
-                    st.session_state.processed_clips = []
+                    # Don't reset processed_clips - let cache handle it
+                    # Reset selection mode when switching drills
+                    if drill_type not in st.session_state.clip_selection_mode:
+                        st.session_state.clip_selection_mode[drill_type] = None
+                        st.session_state.processed_clips = []
         
         if st.session_state.selected_drill:
             st.divider()
@@ -921,6 +1144,280 @@ if st.session_state.searched:
             drill_info = st.session_state.drill_data[drill_type]
             
             st.subheader(f"Drill: {drill_info['title']}")
+            
+            # Clip Selection Mode Buttons (only for multi-clip drills)
+            if not drill_info.get('is_single_video', False):
+                st.divider()
+                
+                # Get current mode
+                current_mode = st.session_state.clip_selection_mode.get(drill_type, None)
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    manual_clip_button = st.button(
+                        "✂️ Manual Clipping",
+                        key=f"manual_clip_{drill_type}",
+                        use_container_width=True,
+                        disabled=(current_mode == 'auto'),
+                        type="primary" if current_mode == 'manual' else "secondary"
+                    )
+                
+                with col2:
+                    auto_clip_button = st.button(
+                        "📹 Select from Auto Generated Clips",
+                        key=f"auto_clip_{drill_type}",
+                        use_container_width=True,
+                        disabled=(current_mode == 'manual'),
+                        type="primary" if current_mode == 'auto' else "secondary"
+                    )
+                
+                if manual_clip_button:
+                    st.session_state.clip_selection_mode[drill_type] = 'manual'
+                    st.session_state.manual_clipping_mode[drill_type] = True
+                    st.session_state.processed_clips = []
+                    st.session_state.manual_clips_created[drill_type] = False
+                
+                if auto_clip_button:
+                    st.session_state.clip_selection_mode[drill_type] = 'auto'
+                    st.session_state.manual_clipping_mode[drill_type] = False
+                    st.session_state.processed_clips = []
+                
+                # Show message if no mode selected
+                if not current_mode:
+                    st.info("👆 Please select a clip mode: **Manual Clipping** or **Auto Generated Clips**")
+                
+                # Check if we're in manual clipping mode
+                if st.session_state.clip_selection_mode.get(drill_type) == 'manual':
+                    st.info("🎬 Manual Clipping Mode: Create custom clips from raw video")
+                    
+                    # Get drill_id and activity_id from gallery collection
+                    drill_id = drill_info.get('drill_id', '')
+                    activity_id = drill_info.get('activity_id', '')
+                    
+                    if not drill_id or not activity_id:
+                        # Try to fetch from MongoDB gallery collection
+                        try:
+                            gallery_query = {
+                                "user_id": st.session_state.assessment_id,
+                                "title": {"$regex": drill_type, "$options": "i"}
+                            }
+                            gallery_doc = gallery_collection.find_one(gallery_query)
+                            if gallery_doc:
+                                drill_id = gallery_doc.get('drill_id', '')
+                                activity_id = gallery_doc.get('activity_id', '')
+                        except Exception as e:
+                            st.error(f"Error fetching drill info: {e}")
+                    
+                    if drill_id and activity_id:
+                        raw_video_url = f"gs://uploads.storage.khiladipro.com/{drill_id}/{activity_id}/{activity_id}.mp4"
+                        st.write(f"**Raw Video URL:** `{raw_video_url}`")
+                        
+                        # Check if manual clips already exist in cache
+                        manual_cache_key = f"{st.session_state.assessment_id}_{drill_type}_manual"
+                        if manual_cache_key in st.session_state.manual_clips_cache and not st.session_state.processed_clips:
+                            st.session_state.processed_clips = st.session_state.manual_clips_cache[manual_cache_key]
+                            st.session_state.manual_clips_created[drill_type] = True
+                            st.info("📦 Loaded manual clips from cache!")
+                        
+                        # Download raw video
+                        raw_video_key = f"{st.session_state.assessment_id}_{drill_type}_raw"
+                        if raw_video_key not in st.session_state.raw_video_data:
+                            with st.spinner("Downloading raw video..."):
+                                try:
+                                    bucket_name, video_object_name = parse_gsutil_url(raw_video_url)
+                                    video_bytes = download_gcs_file_to_bytes(bucket_name, video_object_name)
+                                    
+                                    if video_bytes:
+                                        # Get video duration
+                                        duration = get_video_duration(video_bytes)
+                                        st.session_state.raw_video_data[raw_video_key] = {
+                                            'bytes': video_bytes,
+                                            'duration': duration,
+                                            'url': raw_video_url
+                                        }
+                                        st.success(f"✅ Raw video loaded! Duration: {duration:.2f} seconds")
+                                    else:
+                                        st.error("Failed to download raw video")
+                                except Exception as e:
+                                    st.error(f"Error downloading raw video: {e}")
+                        
+                        # Display raw video and clip creation interface
+                        if raw_video_key in st.session_state.raw_video_data:
+                            raw_video_info = st.session_state.raw_video_data[raw_video_key]
+                            video_duration = raw_video_info['duration']
+                            
+                            col_video, col_controls = st.columns([2, 1])
+                            
+                            with col_video:
+                                st.write("**Raw Video Preview:**")
+                                st.video(raw_video_info['bytes'])
+                                st.info(f"📹 Video Duration: {video_duration:.2f} seconds")
+                            
+                            with col_controls:
+                                st.write("**Clip Settings:**")
+                                
+                                # Number of clips selector
+                                if drill_type not in st.session_state.num_manual_clips:
+                                    st.session_state.num_manual_clips[drill_type] = 1
+                                
+                                num_clips = st.number_input(
+                                    "Number of clips (1-6)",
+                                    min_value=1,
+                                    max_value=6,
+                                    value=st.session_state.num_manual_clips[drill_type],
+                                    key=f"num_clips_{drill_type}"
+                                )
+                                st.session_state.num_manual_clips[drill_type] = num_clips
+                            
+                            # Clip time inputs
+                            st.divider()
+                            st.subheader("⏱️ Define Clip Time Ranges")
+                            
+                            if drill_type not in st.session_state.manual_clip_times:
+                                st.session_state.manual_clip_times[drill_type] = []
+                            
+                            # Ensure we have the right number of entries
+                            while len(st.session_state.manual_clip_times[drill_type]) < num_clips:
+                                st.session_state.manual_clip_times[drill_type].append({'start': 0.0, 'end': min(5.0, video_duration)})
+                            while len(st.session_state.manual_clip_times[drill_type]) > num_clips:
+                                st.session_state.manual_clip_times[drill_type].pop()
+                            
+                            all_valid = True
+                            for i in range(num_clips):
+                                st.write(f"**Clip {i+1}**")
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    start_time = st.number_input(
+                                        f"Start Time (seconds)",
+                                        min_value=0.0,
+                                        max_value=video_duration,
+                                        value=st.session_state.manual_clip_times[drill_type][i]['start'],
+                                        step=0.1,
+                                        key=f"start_{drill_type}_{i}",
+                                        format="%.2f"
+                                    )
+                                    st.session_state.manual_clip_times[drill_type][i]['start'] = start_time
+                                
+                                with col2:
+                                    end_time = st.number_input(
+                                        f"End Time (seconds)",
+                                        min_value=0.0,
+                                        max_value=video_duration,
+                                        value=st.session_state.manual_clip_times[drill_type][i]['end'],
+                                        step=0.1,
+                                        key=f"end_{drill_type}_{i}",
+                                        format="%.2f"
+                                    )
+                                    st.session_state.manual_clip_times[drill_type][i]['end'] = end_time
+                                
+                                # Validation
+                                if start_time >= end_time:
+                                    st.error(f"❌ Clip {i+1}: Start time must be less than end time")
+                                    all_valid = False
+                                elif end_time > video_duration:
+                                    st.error(f"❌ Clip {i+1}: End time exceeds video duration ({video_duration:.2f}s)")
+                                    all_valid = False
+                                elif start_time < 0:
+                                    st.error(f"❌ Clip {i+1}: Start time cannot be negative")
+                                    all_valid = False
+                                else:
+                                    duration = end_time - start_time
+                                    st.success(f"✅ Clip {i+1}: Duration = {duration:.2f}s")
+                                
+                                st.write("")
+                            
+                            # Save New Clips button
+                            st.divider()
+                            col1, col2 = st.columns([1, 3])
+                            with col1:
+                                save_clips_button = st.button(
+                                    "💾 Save New Clips",
+                                    key=f"save_clips_{drill_type}",
+                                    use_container_width=True,
+                                    disabled=not all_valid or st.session_state.manual_clips_created.get(drill_type, False)
+                                )
+                            
+                            if save_clips_button and all_valid:
+                                with st.spinner(f"Creating {num_clips} clips..."):
+                                    try:
+                                        player_name = st.session_state.player_name.lower().replace(' ', '_')
+                                        created_clips = []
+                                        
+                                        progress_bar = st.progress(0)
+                                        
+                                        for i in range(num_clips):
+                                            start_time = st.session_state.manual_clip_times[drill_type][i]['start']
+                                            end_time = st.session_state.manual_clip_times[drill_type][i]['end']
+                                            
+                                            clip_name = f"{player_name}_{drill_type}_clip_{i+1}.mp4"
+                                            
+                                            clip_bytes = create_clip_from_video(
+                                                raw_video_info['bytes'],
+                                                start_time,
+                                                end_time,
+                                                clip_name
+                                            )
+                                            
+                                            if clip_bytes:
+                                                created_clips.append({
+                                                    'name': clip_name,
+                                                    'bytes': clip_bytes,
+                                                    'start': start_time,
+                                                    'end': end_time,
+                                                    'duration': end_time - start_time
+                                                })
+                                            else:
+                                                st.error(f"Failed to create clip {i+1}")
+                                            
+                                            progress_bar.progress((i + 1) / num_clips)
+                                        
+                                        progress_bar.empty()
+                                        
+                                        if len(created_clips) == num_clips:
+                                            st.session_state.processed_clips = created_clips
+                                            st.session_state.manual_clips_created[drill_type] = True
+                                            # Cache manual clips
+                                            manual_cache_key = f"{st.session_state.assessment_id}_{drill_type}_manual"
+                                            st.session_state.manual_clips_cache[manual_cache_key] = created_clips
+                                            st.success(f"✅ Successfully created {num_clips} clips!")
+                                            st.rerun()
+                                        else:
+                                            st.error("Some clips failed to create")
+                                    
+                                    except Exception as e:
+                                        st.error(f"Error creating clips: {e}")
+                            
+                            # Display created clips
+                            if st.session_state.manual_clips_created.get(drill_type, False) and st.session_state.processed_clips:
+                                st.divider()
+                                st.subheader("📹 Created Clips")
+                                
+                                # Display clips in grid
+                                for row in range(0, len(st.session_state.processed_clips), 3):
+                                    cols = st.columns(3)
+                                    
+                                    for col_idx, clip_data in enumerate(st.session_state.processed_clips[row:row+3]):
+                                        clip_idx = row + col_idx
+                                        with cols[col_idx]:
+                                            st.write(f"**Clip {clip_idx + 1}**")
+                                            # Only show timing info if it exists (manual clips)
+                                            if 'start' in clip_data and 'end' in clip_data and 'duration' in clip_data:
+                                                st.write(f"Start: {clip_data['start']:.2f}s | End: {clip_data['end']:.2f}s")
+                                                st.write(f"Duration: {clip_data['duration']:.2f}s")
+                                            st.video(clip_data['bytes'])
+                                
+                                # Continue to Upload & Flyte Task flow
+                                st.divider()
+                                st.info("✅ Clips created! Continue below to upload and run Flyte task.")
+                    else:
+                        st.error("❌ drill_id or activity_id not found for this drill. Cannot load raw video.")
+                        st.write("This drill may not support manual clipping.")
+                
+                # If we're in auto clip mode, load auto-generated clips
+                if st.session_state.clip_selection_mode.get(drill_type) == 'auto':
+                    st.info("📹 Auto-Generated Clips Mode: Select from pre-processed clips")
+                    st.divider()
             
             # Handle running_drill (single video) separately
             if drill_info.get('is_single_video', False) and drill_type == 'running_drill':
@@ -1169,22 +1666,38 @@ if st.session_state.searched:
             
             # Handle regular multi-clip drills
             elif not drill_info.get('is_single_video', False):
-                if not st.session_state.processed_clips:
-                    processed_clips, error = download_and_process_clips(
-                        st.session_state.assessment_id,
-                        st.session_state.player_name,
-                        drill_type,
-                        drill_info['clips']
-                    )
+                # Only download clips if in auto mode
+                if st.session_state.clip_selection_mode.get(drill_type) == 'auto':
+                    # Check cache first
+                    auto_cache_key = f"{st.session_state.assessment_id}_{drill_type}_auto"
                     
-                    if error:
-                        st.error(error)
-                    else:
-                        st.session_state.processed_clips = processed_clips
-                        st.success(f"Processed {len(processed_clips)} clips!")
+                    if auto_cache_key in st.session_state.auto_clips_cache:
+                        if not st.session_state.processed_clips:
+                            st.session_state.processed_clips = st.session_state.auto_clips_cache[auto_cache_key]
+                            st.info("📦 Loaded auto-generated clips from cache!")
+                    elif not st.session_state.processed_clips:
+                        # Download and process clips
+                        processed_clips, error = download_and_process_clips(
+                            st.session_state.assessment_id,
+                            st.session_state.player_name,
+                            drill_type,
+                            drill_info['clips']
+                        )
+                        
+                        if error:
+                            st.error(error)
+                        else:
+                            st.session_state.processed_clips = processed_clips
+                            # Cache auto clips
+                            st.session_state.auto_clips_cache[auto_cache_key] = processed_clips
+                            st.success(f"Processed {len(processed_clips)} clips!")
                 
                 if st.session_state.processed_clips:
-                    st.write(f"**Showing {len(st.session_state.processed_clips)} clips**")
+                    # Check if we're in manual clipping mode with created clips
+                    in_manual_mode = st.session_state.clip_selection_mode.get(drill_type) == 'manual' and st.session_state.manual_clips_created.get(drill_type, False)
+                    
+                    if not in_manual_mode:
+                        st.write(f"**Showing {len(st.session_state.processed_clips)} clips**")
                     
                     # Coach Feedback Section - Before Clip Selection
                     st.divider()
@@ -1233,35 +1746,42 @@ if st.session_state.searched:
                     
                     st.divider()
                     
-                    if drill_type not in st.session_state.selected_clips:
-                        st.session_state.selected_clips[drill_type] = []
-                    
-                    clips_to_show = st.session_state.processed_clips[:18]
-                    
-                    for row in range(0, len(clips_to_show), 3):
-                        cols = st.columns(3)
+                    # If in manual mode, skip clip selection and auto-select all clips
+                    if in_manual_mode:
+                        st.info("🎬 Manual clips created! All clips are automatically selected for upload.")
+                        # Auto-select all manual clips
+                        st.session_state.selected_clips[drill_type] = list(range(len(st.session_state.processed_clips)))
+                    else:
+                        # Normal clip selection flow
+                        if drill_type not in st.session_state.selected_clips:
+                            st.session_state.selected_clips[drill_type] = []
                         
-                        for col_idx, clip_data in enumerate(clips_to_show[row:row+3]):
-                            clip_idx = row + col_idx
-                            with cols[col_idx]:
-                                is_selected = st.checkbox(
-                                    f"Select Clip {clip_idx + 1}",
-                                    value=clip_idx in st.session_state.selected_clips[drill_type],
-                                    key=f"select_{drill_type}_{clip_idx}"
-                                )
-                                
-                                if is_selected and clip_idx not in st.session_state.selected_clips[drill_type]:
-                                    st.session_state.selected_clips[drill_type].append(clip_idx)
-                                elif not is_selected and clip_idx in st.session_state.selected_clips[drill_type]:
-                                    st.session_state.selected_clips[drill_type].remove(clip_idx)
-                                
-                                clip_name = clip_data['name']
-                                clip_bytes = clip_data['bytes']
-                                st.write(f"**Clip {clip_idx + 1}**")
-                                st.video(clip_bytes)
-                    
-                    if len(st.session_state.processed_clips) > 18:
-                        st.info(f"Showing first 18 of {len(st.session_state.processed_clips)} clips")
+                        clips_to_show = st.session_state.processed_clips[:12]
+                        
+                        for row in range(0, len(clips_to_show), 3):
+                            cols = st.columns(3)
+                            
+                            for col_idx, clip_data in enumerate(clips_to_show[row:row+3]):
+                                clip_idx = row + col_idx
+                                with cols[col_idx]:
+                                    is_selected = st.checkbox(
+                                        f"Select Clip {clip_idx + 1}",
+                                        value=clip_idx in st.session_state.selected_clips[drill_type],
+                                        key=f"select_{drill_type}_{clip_idx}"
+                                    )
+                                    
+                                    if is_selected and clip_idx not in st.session_state.selected_clips[drill_type]:
+                                        st.session_state.selected_clips[drill_type].append(clip_idx)
+                                    elif not is_selected and clip_idx in st.session_state.selected_clips[drill_type]:
+                                        st.session_state.selected_clips[drill_type].remove(clip_idx)
+                                    
+                                    clip_name = clip_data['name']
+                                    clip_bytes = clip_data['bytes']
+                                    st.write(f"**Clip {clip_idx + 1}**")
+                                    st.video(clip_bytes)
+                        
+                        if len(st.session_state.processed_clips) > 12:
+                            st.info(f"Showing first 12 of {len(st.session_state.processed_clips)} clips")
                     
                     # Flyte Task Workflow Section
                     st.divider()
@@ -1334,7 +1854,7 @@ if st.session_state.searched:
                                 if 'backfoot_defense' not in st.session_state.selected_clips:
                                     st.session_state.selected_clips['backfoot_defense'] = []
                                 
-                                defense_clips_to_show = defense_clips[:18]
+                                defense_clips_to_show = defense_clips[:12]
                                 
                                 for row in range(0, len(defense_clips_to_show), 3):
                                     cols = st.columns(3)
@@ -1356,8 +1876,8 @@ if st.session_state.searched:
                                             st.write(f"**Defense Clip {clip_idx + 1}**")
                                             st.video(clip_data['bytes'])
                                 
-                                if len(defense_clips) > 18:
-                                    st.info(f"Showing first 18 of {len(defense_clips)} defense clips")
+                                if len(defense_clips) > 12:
+                                    st.info(f"Showing first 12 of {len(defense_clips)} defense clips")
                                 
                                 # Upload defense clips
                                 num_defense_selected = len(st.session_state.selected_clips.get('backfoot_defense', []))
@@ -1693,10 +2213,12 @@ with st.sidebar:
     1. Search for assessments by ID
     2. View player information
     3. Browse available drill types
-    4. View drill clips in a grid
-    5. Add and save coach feedback (before clip selection)
-    6. Select clips for Flyte tasks
-    7. Upload clips to GCS
+    4. **Choose clip mode**:
+       - ✂️ Manual Clipping: Create custom clips from raw video
+       - 📹 Auto Generated: Select from pre-processed clips
+    5. View and select drill clips (cached for performance)
+    6. Add and save coach feedback (before clip selection)
+    7. Upload selected clips to GCS
     8. Run Flyte tasks with custom inputs (auto-populates saved feedback)
     9. Monitor task execution status
     10. Edit shot angles and ball directions (drive drills)
@@ -1709,6 +2231,13 @@ with st.sidebar:
         st.write(f"**Player:** {st.session_state.player_name}")
         if st.session_state.selected_drill:
             st.write(f"**Selected Drill:** {st.session_state.selected_drill}")
+            drill_mode = st.session_state.clip_selection_mode.get(st.session_state.selected_drill, 'None')
+            if drill_mode == 'manual':
+                st.write(f"**Mode:** ✂️ Manual Clipping")
+            elif drill_mode == 'auto':
+                st.write(f"**Mode:** 📹 Auto-Generated")
+            else:
+                st.write(f"**Mode:** Not selected")
             st.write(f"**Clips:** {len(st.session_state.processed_clips)}")
         
         st.divider()
@@ -1731,11 +2260,18 @@ with st.sidebar:
         
         st.divider()
         st.subheader("Cache Info")
-        num_cached = len(st.session_state.clips_cache)
-        st.write(f"**Cached Drills:** {num_cached}")
-        if num_cached > 0:
-            for cache_key in st.session_state.clips_cache.keys():
-                st.write(f"- {cache_key}")
+        num_old_cached = len(st.session_state.clips_cache)
+        num_auto_cached = len(st.session_state.auto_clips_cache)
+        num_manual_cached = len(st.session_state.manual_clips_cache)
+        total_cached = num_old_cached + num_auto_cached + num_manual_cached
+        
+        st.write(f"**Total Cached:** {total_cached}")
+        if num_auto_cached > 0:
+            st.write(f"- Auto clips: {num_auto_cached}")
+        if num_manual_cached > 0:
+            st.write(f"- Manual clips: {num_manual_cached}")
+        if num_old_cached > 0:
+            st.write(f"- Legacy cache: {num_old_cached}")
     
     st.divider()
     if st.button("🗑️ Clear Cache & Reset", use_container_width=True):
@@ -1757,12 +2293,14 @@ with st.sidebar:
         st.session_state.defense_processed_clips = {}
         st.session_state.defense_signed_urls = {}
         st.session_state.saved_coach_feedback = {}
+        st.session_state.manual_clipping_mode = {}
+        st.session_state.raw_video_data = {}
+        st.session_state.num_manual_clips = {}
+        st.session_state.manual_clip_times = {}
+        st.session_state.manual_clips_created = {}
+        st.session_state.clip_selection_mode = {}
+        st.session_state.auto_clips_cache = {}
+        st.session_state.manual_clips_cache = {}
         st.success("Cache cleared!")
         st.rerun()
-
-
-
-
-
-
 
