@@ -1,6 +1,7 @@
 streamlit>=1.28.0
 pymongo>=4.5.0
 google-cloud-storage>=2.10.0
-moviepy>=1.0.3
+moviepy>=2.2.1
 requests>=2.31.0
+
 python-dotenv>=1.0.1
