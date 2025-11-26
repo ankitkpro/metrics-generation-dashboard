@@ -748,6 +748,11 @@ def search_assessment(assessment_id):
         
         drill_data = {}
         for doc in gallery_results:
+            # Only process records with status 'processed' or 'uploaded'
+            doc_status = doc.get('status', '')
+            if doc_status not in ['processed', 'uploaded']:
+                continue
+            
             drill = doc.get('title', '')
             clips = doc.get('clips', [])
             drill_id = doc.get('drill_id', '')
@@ -783,10 +788,13 @@ def search_assessment(assessment_id):
                     'activity_id': activity_id,
                     'is_single_video': True
                 }
-            elif clips:
+            else:
+                # Add drill even if it has 0 clips (for manual clipping support)
                 drill_data[drill_type] = {
                     'title': drill,
-                    'clips': clips,
+                    'clips': clips if clips else [],
+                    'drill_id': drill_id,
+                    'activity_id': activity_id,
                     'is_single_video': False
                 }
         
@@ -1149,8 +1157,22 @@ if st.session_state.searched:
             if not drill_info.get('is_single_video', False):
                 st.divider()
                 
+                # Check if drill has any clips
+                num_clips = len(drill_info.get('clips', []))
+                has_clips = num_clips > 0
+                
                 # Get current mode
                 current_mode = st.session_state.clip_selection_mode.get(drill_type, None)
+                
+                # Auto-select manual mode if no clips available
+                if not has_clips and not current_mode:
+                    st.session_state.clip_selection_mode[drill_type] = 'manual'
+                    st.session_state.manual_clipping_mode[drill_type] = True
+                    current_mode = 'manual'
+                
+                # Show info if no clips available
+                if not has_clips:
+                    st.warning("⚠️ No auto-generated clips available for this drill. Only **Manual Clipping** mode is enabled.")
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -1158,7 +1180,7 @@ if st.session_state.searched:
                         "✂️ Manual Clipping",
                         key=f"manual_clip_{drill_type}",
                         use_container_width=True,
-                        disabled=(current_mode == 'auto'),
+                        disabled=(current_mode == 'auto' and has_clips),
                         type="primary" if current_mode == 'manual' else "secondary"
                     )
                 
@@ -1167,7 +1189,7 @@ if st.session_state.searched:
                         "📹 Select from Auto Generated Clips",
                         key=f"auto_clip_{drill_type}",
                         use_container_width=True,
-                        disabled=(current_mode == 'manual'),
+                        disabled=(current_mode == 'manual') or not has_clips,
                         type="primary" if current_mode == 'auto' else "secondary"
                     )
                 
@@ -1177,13 +1199,13 @@ if st.session_state.searched:
                     st.session_state.processed_clips = []
                     st.session_state.manual_clips_created[drill_type] = False
                 
-                if auto_clip_button:
+                if auto_clip_button and has_clips:
                     st.session_state.clip_selection_mode[drill_type] = 'auto'
                     st.session_state.manual_clipping_mode[drill_type] = False
                     st.session_state.processed_clips = []
                 
-                # Show message if no mode selected
-                if not current_mode:
+                # Show message if no mode selected (and clips are available)
+                if not current_mode and has_clips:
                     st.info("👆 Please select a clip mode: **Manual Clipping** or **Auto Generated Clips**")
                 
                 # Check if we're in manual clipping mode
@@ -1196,15 +1218,28 @@ if st.session_state.searched:
                     
                     if not drill_id or not activity_id:
                         # Try to fetch from MongoDB gallery collection
+                        # Only use records with status 'processed' or 'uploaded'
                         try:
                             gallery_query = {
                                 "user_id": st.session_state.assessment_id,
-                                "title": {"$regex": drill_type, "$options": "i"}
+                                "title": {"$regex": drill_type, "$options": "i"},
+                                "status": {"$in": ["processed", "uploaded"]}
                             }
                             gallery_doc = gallery_collection.find_one(gallery_query)
                             if gallery_doc:
                                 drill_id = gallery_doc.get('drill_id', '')
                                 activity_id = gallery_doc.get('activity_id', '')
+                                st.info(f"✅ Found drill record with status: {gallery_doc.get('status', 'N/A')}")
+                            else:
+                                # If no processed/uploaded record found, show available records
+                                all_records_query = {
+                                    "user_id": st.session_state.assessment_id,
+                                    "title": {"$regex": drill_type, "$options": "i"}
+                                }
+                                all_records = list(gallery_collection.find(all_records_query))
+                                if all_records:
+                                    statuses = [rec.get('status', 'unknown') for rec in all_records]
+                                    st.warning(f"⚠️ No 'processed' or 'uploaded' record found. Available statuses: {', '.join(statuses)}")
                         except Exception as e:
                             st.error(f"Error fetching drill info: {e}")
                     
@@ -2303,4 +2338,5 @@ with st.sidebar:
         st.session_state.manual_clips_cache = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
