@@ -50,6 +50,31 @@ staging_client = MongoClient(staging_connection_string)
 staging_db = staging_client['kpro']
 drills_collection = staging_db['drill_results']
 
+
+
+# ============================================================================
+# DIAGNOSTIC CHECKS FOR MOVIEPY
+# ============================================================================
+def check_video_dependencies():
+    """Check if video processing dependencies are available"""
+    issues = []
+    try:
+        # Verify moviepy can load
+        from moviepy.config import get_setting
+        print(f"✅ MoviePy loaded successfully")
+    except Exception as e:
+        issues.append(f"Error loading MoviePy: {str(e)}")
+    
+    return issues
+
+# Run diagnostic check
+DEPENDENCY_ISSUES = check_video_dependencies()
+if DEPENDENCY_ISSUES:
+    print("⚠️ Video processing dependency issues detected:")
+    for issue in DEPENDENCY_ISSUES:
+        print(f"  - {issue}")
+
+
 # ============================================================================
 # GCS UTILITY FUNCTIONS
 # ============================================================================
@@ -340,7 +365,9 @@ def process_clip_to_bytes(video_bytes, clip_name):
                 print(f"Warning: Could not delete temp output file: {e}")
 
 def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
-    """Create a clip from video bytes using start and end times (in seconds)"""
+    """Create a clip from video bytes using start and end times (in seconds)
+    Returns: tuple (clip_bytes, error_message) - clip_bytes is None if error occurred
+    """
     temp_input_path = None
     temp_output_path = None
     video = None
@@ -363,11 +390,38 @@ def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
             end_time = video.duration
         if start_time >= end_time:
             video.close()
-            raise ValueError(f"Start time ({start_time}) must be less than end time ({end_time})")
+            error_msg = f"Start time ({start_time}) must be less than end time ({end_time})"
+            print(f"Error creating clip {clip_name}: {error_msg}")
+            return None, error_msg
         
         # Create subclip
         clip = video.subclip(start_time, end_time)
-        clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
+        
+        # Try to write with different codec options for better compatibility
+        try:
+            # First try: standard libx264 with audio
+            clip.write_videofile(
+                temp_output_path, 
+                codec='libx264',
+                audio_codec='aac',
+                temp_audiofile='temp-audio.m4a',
+                remove_temp=True,
+                logger=None,
+                preset='ultrafast',
+                threads=4
+            )
+        except Exception as codec_error:
+            print(f"Failed with standard codec, trying without audio: {codec_error}")
+            # Fallback: try without audio
+            clip.write_videofile(
+                temp_output_path,
+                codec='libx264',
+                audio=False,
+                remove_temp=True,
+                logger=None,
+                preset='ultrafast',
+                threads=4
+            )
         
         # Close video objects before reading output
         clip.close()
@@ -381,11 +435,20 @@ def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
         with open(temp_output_path, 'rb') as f:
             clip_bytes = f.read()
         
-        return clip_bytes
+        return clip_bytes, None
         
     except Exception as e:
-        print(f"Error creating clip {clip_name}: {e}")
-        return None
+        error_msg = f"{type(e).__name__}: {str(e)}"
+        print(f"Error creating clip {clip_name}: {error_msg}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        print(traceback_str)
+        
+        # Add more context to error message
+        if "FFMPEG" in str(e).upper():
+            error_msg += " (Hint: FFMPEG binary issue detected)"
+        
+        return None, error_msg
     
     finally:
         # Ensure all video objects are closed
@@ -1212,6 +1275,15 @@ if st.session_state.searched:
                 if st.session_state.clip_selection_mode.get(drill_type) == 'manual':
                     st.info("🎬 Manual Clipping Mode: Create custom clips from raw video")
                     
+                    # Show dependency warnings if any
+                    if DEPENDENCY_ISSUES:
+                        st.warning("⚠️ **Video Processing Dependencies Issue Detected**")
+                        with st.expander("View Dependency Issues (Click to expand)"):
+                            st.write("The following issues may prevent video clipping from working:")
+                            for issue in DEPENDENCY_ISSUES:
+                                st.write(f"• {issue}")
+                            st.write("\n**Note:** Ensure MoviePy and its dependencies are properly installed.")
+                    
                     # Get drill_id and activity_id from gallery collection
                     drill_id = drill_info.get('drill_id', '')
                     activity_id = drill_info.get('activity_id', '')
@@ -1381,13 +1453,14 @@ if st.session_state.searched:
                                         
                                         progress_bar = st.progress(0)
                                         
+                                        error_messages = []
                                         for i in range(num_clips):
                                             start_time = st.session_state.manual_clip_times[drill_type][i]['start']
                                             end_time = st.session_state.manual_clip_times[drill_type][i]['end']
                                             
                                             clip_name = f"{player_name}_{drill_type}_clip_{i+1}.mp4"
                                             
-                                            clip_bytes = create_clip_from_video(
+                                            clip_bytes, error_msg = create_clip_from_video(
                                                 raw_video_info['bytes'],
                                                 start_time,
                                                 end_time,
@@ -1403,7 +1476,8 @@ if st.session_state.searched:
                                                     'duration': end_time - start_time
                                                 })
                                             else:
-                                                st.error(f"Failed to create clip {i+1}")
+                                                error_messages.append(f"Clip {i+1}: {error_msg}")
+                                                st.error(f"❌ Failed to create clip {i+1}: {error_msg}")
                                             
                                             progress_bar.progress((i + 1) / num_clips)
                                         
@@ -1418,7 +1492,11 @@ if st.session_state.searched:
                                             st.success(f"✅ Successfully created {num_clips} clips!")
                                             st.rerun()
                                         else:
-                                            st.error("Some clips failed to create")
+                                            st.error(f"❌ Some clips failed to create ({len(created_clips)}/{num_clips} successful)")
+                                            if error_messages:
+                                                with st.expander("View Error Details"):
+                                                    for err in error_messages:
+                                                        st.write(f"• {err}")
                                     
                                     except Exception as e:
                                         st.error(f"Error creating clips: {e}")
