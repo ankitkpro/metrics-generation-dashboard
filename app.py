@@ -75,6 +75,7 @@ if DEPENDENCY_ISSUES:
         print(f"  - {issue}")
 
 
+
 # ============================================================================
 # GCS UTILITY FUNCTIONS
 # ============================================================================
@@ -879,6 +880,7 @@ def download_and_process_clips(assessment_id, player_full_name, drill_type, clip
             return st.session_state.clips_cache[cache_key], None
         
         player_name = player_full_name.lower().replace(' ', '_')
+        player_name = player_name.replace('.', '_')
         processed_clips = []
         
         with st.spinner(f'Downloading and processing {len(clips)} clips...'):
@@ -914,6 +916,7 @@ def upload_selected_clips_to_gcs(assessment_id, player_name, drill_type, selecte
     """Upload selected clips to GCS with sequential numbering"""
     try:
         player_name_formatted = player_name.lower().replace(' ', '_')
+        player_name_formatted = player_name_formatted.replace('.', '_')
         folder_name = f"{GCS_PARENT_FOLDER_NAME}{player_name_formatted}_{assessment_id}/"
         
         create_gcs_folder(GCS_BUCKET_NAME, folder_name)
@@ -956,6 +959,7 @@ def upload_selected_clips_to_gcs(assessment_id, player_name, drill_type, selecte
 def build_flyte_inputs(drill_type, player_name, assessment_id, signed_urls, coach_feedback="", defense_urls=[]):
     """Build Flyte task inputs based on drill type"""
     player_name_formatted = player_name.lower().replace(' ', '_')
+    player_name_formatted = player_name_formatted.replace('.', '_')
     
     drill_configs = {
         'tophand': {
@@ -2416,5 +2420,4 @@ with st.sidebar:
         st.session_state.manual_clips_cache = {}
         st.success("Cache cleared!")
         st.rerun()
-
 
