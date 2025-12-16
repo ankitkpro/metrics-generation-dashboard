@@ -59,9 +59,14 @@ def check_video_dependencies():
     """Check if video processing dependencies are available"""
     issues = []
     try:
-        # Verify moviepy can load
-        from moviepy.config import get_setting
-        print(f"✅ MoviePy loaded successfully")
+        # Verify moviepy can load (compatible with both 1.x and 2.x)
+        try:
+            from moviepy.config import get_setting
+            print(f"✅ MoviePy 1.x loaded successfully")
+        except ImportError:
+            # MoviePy 2.x doesn't have get_setting, just check basic import
+            from moviepy import VideoFileClip
+            print(f"✅ MoviePy 2.x loaded successfully")
     except Exception as e:
         issues.append(f"Error loading MoviePy: {str(e)}")
     
@@ -73,7 +78,6 @@ if DEPENDENCY_ISSUES:
     print("⚠️ Video processing dependency issues detected:")
     for issue in DEPENDENCY_ISSUES:
         print(f"  - {issue}")
-
 
 
 # ============================================================================
@@ -325,7 +329,12 @@ def process_clip_to_bytes(video_bytes, clip_name):
             temp_output_path = temp_output.name
         
         clip = VideoFileClip(temp_input_path)
-        clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
+        # MoviePy 2.x compatible write (remove_temp parameter removed in 2.x)
+        try:
+            clip.write_videofile(temp_output_path, codec='libx264', audio=True, logger=None)
+        except TypeError:
+            # Fallback to MoviePy 1.x API
+            clip.write_videofile(temp_output_path, codec='libx264', audio=True, remove_temp=True, logger=None)
         clip.close()
         clip = None
         
@@ -395,34 +404,63 @@ def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
             print(f"Error creating clip {clip_name}: {error_msg}")
             return None, error_msg
         
-        # Create subclip
-        clip = video.subclip(start_time, end_time)
+        # Create subclip (moviepy 2.x uses subclipped() instead of subclip())
+        try:
+            # Try moviepy 2.x method first
+            clip = video.subclipped(start_time, end_time)
+        except AttributeError:
+            # Fall back to moviepy 1.x method
+            clip = video.subclip(start_time, end_time)
         
         # Try to write with different codec options for better compatibility
         try:
-            # First try: standard libx264 with audio
-            clip.write_videofile(
-                temp_output_path, 
-                codec='libx264',
-                audio_codec='aac',
-                temp_audiofile='temp-audio.m4a',
-                remove_temp=True,
-                logger=None,
-                preset='ultrafast',
-                threads=4
-            )
+            # First try: standard libx264 with audio (moviepy 2.x compatible)
+            try:
+                # MoviePy 2.x simplified API
+                clip.write_videofile(
+                    temp_output_path, 
+                    codec='libx264',
+                    audio_codec='aac',
+                    logger=None,
+                    preset='ultrafast',
+                    threads=4
+                )
+            except TypeError:
+                # MoviePy 1.x API with more parameters
+                clip.write_videofile(
+                    temp_output_path, 
+                    codec='libx264',
+                    audio_codec='aac',
+                    temp_audiofile='temp-audio.m4a',
+                    remove_temp=True,
+                    logger=None,
+                    preset='ultrafast',
+                    threads=4
+                )
         except Exception as codec_error:
             print(f"Failed with standard codec, trying without audio: {codec_error}")
             # Fallback: try without audio
-            clip.write_videofile(
-                temp_output_path,
-                codec='libx264',
-                audio=False,
-                remove_temp=True,
-                logger=None,
-                preset='ultrafast',
-                threads=4
-            )
+            try:
+                # MoviePy 2.x
+                clip.write_videofile(
+                    temp_output_path,
+                    codec='libx264',
+                    audio=False,
+                    logger=None,
+                    preset='ultrafast',
+                    threads=4
+                )
+            except TypeError:
+                # MoviePy 1.x
+                clip.write_videofile(
+                    temp_output_path,
+                    codec='libx264',
+                    audio=False,
+                    remove_temp=True,
+                    logger=None,
+                    preset='ultrafast',
+                    threads=4
+                )
         
         # Close video objects before reading output
         clip.close()
@@ -2420,4 +2458,5 @@ with st.sidebar:
         st.session_state.manual_clips_cache = {}
         st.success("Cache cleared!")
         st.rerun()
+
 
