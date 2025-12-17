@@ -13,6 +13,9 @@ import time
 import requests
 from typing import Dict, Any
 from dotenv import load_dotenv
+from PIL import Image
+import io
+from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
 
@@ -49,6 +52,7 @@ staging_connection_string = st.secrets["MONGO_CONNECTION_STRING_STAGING"]
 staging_client = MongoClient(staging_connection_string)
 staging_db = staging_client['kpro']
 drills_collection = staging_db['drill_results']
+
 
 
 
@@ -374,7 +378,7 @@ def process_clip_to_bytes(video_bytes, clip_name):
             except Exception as e:
                 print(f"Warning: Could not delete temp output file: {e}")
 
-def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
+def create_clip_from_video(video_bytes, start_time, end_time, clip_name, blur_mask=None, blur_level=1):
     """Create a clip from video bytes using start and end times (in seconds)
     Returns: tuple (clip_bytes, error_message) - clip_bytes is None if error occurred
     """
@@ -411,6 +415,19 @@ def create_clip_from_video(video_bytes, start_time, end_time, clip_name):
         except AttributeError:
             # Fall back to moviepy 1.x method
             clip = video.subclip(start_time, end_time)
+        
+        # If blur mask is provided, apply blur using OpenCV approach
+        if blur_mask is not None and blur_level > 0:
+            # Apply blur frame by frame
+            def blur_frame(get_frame, t):
+                frame = get_frame(t)
+                return apply_blur_to_frame(frame, blur_mask, blur_level)
+            
+            try:
+                clip = clip.fl(blur_frame)
+            except:
+                # If fl() doesn't work, try transform
+                clip = clip.transform(blur_frame)
         
         # Try to write with different codec options for better compatibility
         try:
@@ -560,6 +577,152 @@ def get_video_duration(video_bytes):
                 os.unlink(temp_input_path)
             except Exception as e:
                 print(f"Warning: Could not delete temp file: {e}")
+
+def get_video_first_frame(video_bytes):
+    """Extract first frame from video for blur mask creation"""
+    temp_input_path = None
+    
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
+            temp_input.write(video_bytes)
+            temp_input_path = temp_input.name
+        
+        # Use OpenCV to read first frame
+        cap = cv2.VideoCapture(temp_input_path)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if ret:
+            # Convert BGR to RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return frame_rgb
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"Error extracting first frame: {e}")
+        return None
+    
+    finally:
+        # Clean up temp file
+        time.sleep(0.1)
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp file: {e}")
+
+def apply_blur_to_frame(frame, blur_mask, blur_level):
+    """Apply blur to a single frame using the blur mask"""
+    try:
+        if blur_mask is None or blur_level == 0:
+            return frame
+        
+        # Resize mask to match frame size if needed
+        if blur_mask.shape[:2] != frame.shape[:2]:
+            blur_mask = cv2.resize(blur_mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+        
+        # Convert mask to binary
+        mask_binary = (blur_mask > 0).astype(np.uint8)
+        
+        # Determine blur kernel size based on level (1=low, 2=medium, 3=high)
+        kernel_sizes = {1: 15, 2: 31, 3: 51}
+        kernel_size = kernel_sizes.get(blur_level, 31)
+        
+        # Ensure kernel size is odd
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        
+        # Apply Gaussian blur to the entire frame
+        blurred_frame = cv2.GaussianBlur(frame, (kernel_size, kernel_size), 0)
+        
+        # Expand mask to 3 channels
+        mask_3channel = np.stack([mask_binary] * 3, axis=-1)
+        
+        # Combine original and blurred frames using mask
+        result = np.where(mask_3channel, blurred_frame, frame)
+        
+        return result.astype(np.uint8)
+        
+    except Exception as e:
+        print(f"Error applying blur to frame: {e}")
+        return frame
+
+def apply_blur_to_video(video_bytes, blur_mask, blur_level, progress_callback=None):
+    """Apply blur mask to entire video"""
+    temp_input_path = None
+    temp_output_path = None
+    
+    try:
+        # Write video bytes to temp file
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
+            temp_input.write(video_bytes)
+            temp_input_path = temp_input.name
+        
+        # Open video with OpenCV
+        cap = cv2.VideoCapture(temp_input_path)
+        
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Create temp output file
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
+            temp_output_path = temp_output.name
+        
+        # Create video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+        
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # Apply blur to frame
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            blurred_frame_rgb = apply_blur_to_frame(frame_rgb, blur_mask, blur_level)
+            blurred_frame_bgr = cv2.cvtColor(blurred_frame_rgb, cv2.COLOR_RGB2BGR)
+            
+            out.write(blurred_frame_bgr)
+            
+            frame_count += 1
+            if progress_callback and total_frames > 0:
+                progress_callback(frame_count / total_frames)
+        
+        cap.release()
+        out.release()
+        
+        # Small delay to ensure file handles are released
+        time.sleep(0.1)
+        
+        # Read processed video
+        with open(temp_output_path, 'rb') as f:
+            processed_video_bytes = f.read()
+        
+        return processed_video_bytes
+        
+    except Exception as e:
+        print(f"Error applying blur to video: {e}")
+        return None
+    
+    finally:
+        # Clean up temp files
+        time.sleep(0.1)
+        if temp_input_path and os.path.exists(temp_input_path):
+            try:
+                os.unlink(temp_input_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp input file: {e}")
+        
+        if temp_output_path and os.path.exists(temp_output_path):
+            try:
+                os.unlink(temp_output_path)
+            except Exception as e:
+                print(f"Warning: Could not delete temp output file: {e}")
 
 # ============================================================================
 # SCORING & METRICS FUNCTIONS
@@ -1154,6 +1317,14 @@ if 'auto_clips_cache' not in st.session_state:
     st.session_state.auto_clips_cache = {}
 if 'manual_clips_cache' not in st.session_state:
     st.session_state.manual_clips_cache = {}
+if 'blur_masks' not in st.session_state:
+    st.session_state.blur_masks = {}
+if 'blur_levels' not in st.session_state:
+    st.session_state.blur_levels = {}
+if 'blur_history' not in st.session_state:
+    st.session_state.blur_history = {}
+if 'blur_enabled' not in st.session_state:
+    st.session_state.blur_enabled = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -1213,6 +1384,10 @@ if search_button and assessment_id:
         st.session_state.clip_selection_mode = {}
         st.session_state.auto_clips_cache = {}
         st.session_state.manual_clips_cache = {}
+        st.session_state.blur_masks = {}
+        st.session_state.blur_levels = {}
+        st.session_state.blur_history = {}
+        st.session_state.blur_enabled = {}
         st.success(f"Found assessment for {player_name}")
 
 # Display results
@@ -1418,6 +1593,134 @@ if st.session_state.searched:
                                 )
                                 st.session_state.num_manual_clips[drill_type] = num_clips
                             
+                            # Blur Area Selection Section
+                            st.divider()
+                            st.subheader("🎨 Blur Area Selection (Optional)")
+                            
+                            blur_key = f"{st.session_state.assessment_id}_{drill_type}"
+                            
+                            # Initialize blur enabled state
+                            if blur_key not in st.session_state.blur_enabled:
+                                st.session_state.blur_enabled[blur_key] = False
+                            
+                            enable_blur = st.checkbox(
+                                "Enable blur for this drill",
+                                value=st.session_state.blur_enabled.get(blur_key, False),
+                                key=f"enable_blur_{drill_type}"
+                            )
+                            st.session_state.blur_enabled[blur_key] = enable_blur
+                            
+                            if enable_blur:
+                                st.info("✏️ Draw on the image below to mark areas you want to blur in all clips")
+                                
+                                # Get first frame for blur mask creation
+                                first_frame = get_video_first_frame(raw_video_info['bytes'])
+                                
+                                if first_frame is not None:
+                                    # Convert to PIL Image
+                                    pil_image = Image.fromarray(first_frame)
+                                    
+                                    # Resize for canvas (make it reasonable size)
+                                    canvas_width = 640
+                                    aspect_ratio = pil_image.height / pil_image.width
+                                    canvas_height = int(canvas_width * aspect_ratio)
+                                    
+                                    col1, col2 = st.columns([3, 1])
+                                    
+                                    with col1:
+                                        # Blur level selector
+                                        if blur_key not in st.session_state.blur_levels:
+                                            st.session_state.blur_levels[blur_key] = 2
+                                        
+                                        blur_level = st.select_slider(
+                                            "Blur Intensity",
+                                            options=[1, 2, 3],
+                                            value=st.session_state.blur_levels.get(blur_key, 2),
+                                            format_func=lambda x: {1: "Low", 2: "Medium", 3: "High"}[x],
+                                            key=f"blur_level_{drill_type}"
+                                        )
+                                        st.session_state.blur_levels[blur_key] = blur_level
+                                        
+                                        # Drawing canvas
+                                        canvas_result = st_canvas(
+                                            fill_color="rgba(255, 0, 0, 0.3)",
+                                            stroke_width=20,
+                                            stroke_color="rgba(255, 0, 0, 0.8)",
+                                            background_image=pil_image,
+                                            update_streamlit=True,
+                                            height=canvas_height,
+                                            width=canvas_width,
+                                            drawing_mode="freedraw",
+                                            key=f"canvas_{drill_type}",
+                                        )
+                                    
+                                    with col2:
+                                        st.write("**Controls:**")
+                                        st.write("🖌️ Draw to mark blur area")
+                                        st.write(f"📊 Blur Level: **{['Low', 'Medium', 'High'][blur_level-1]}**")
+                                        
+                                        # Undo button (clear canvas)
+                                        if st.button("↩️ Clear Canvas", key=f"undo_blur_{drill_type}", use_container_width=True):
+                                            st.session_state.blur_masks.pop(blur_key, None)
+                                            st.session_state.blur_history.pop(blur_key, None)
+                                            st.rerun()
+                                        
+                                        # Save blur mask button
+                                        save_blur_button = st.button(
+                                            "💾 Save Blur Area",
+                                            key=f"save_blur_{drill_type}",
+                                            use_container_width=True,
+                                            type="primary"
+                                        )
+                                    
+                                    if save_blur_button and canvas_result.image_data is not None:
+                                        with st.spinner("Processing blur mask..."):
+                                            try:
+                                                # Extract alpha channel as mask
+                                                canvas_image = canvas_result.image_data
+                                                
+                                                # Check if there are any drawings
+                                                if canvas_image[:, :, 3].max() > 0:
+                                                    # Get alpha channel (drawings are non-zero)
+                                                    mask = canvas_image[:, :, 3]
+                                                    
+                                                    # Resize mask to match original video dimensions
+                                                    original_height, original_width = first_frame.shape[:2]
+                                                    mask_resized = cv2.resize(mask, (original_width, original_height), interpolation=cv2.INTER_NEAREST)
+                                                    
+                                                    # Threshold to binary mask
+                                                    _, mask_binary = cv2.threshold(mask_resized, 10, 255, cv2.THRESH_BINARY)
+                                                    
+                                                    # Store mask in session state
+                                                    st.session_state.blur_masks[blur_key] = mask_binary
+                                                    st.session_state.blur_history[blur_key] = {
+                                                        'mask': mask_binary,
+                                                        'level': blur_level
+                                                    }
+                                                    
+                                                    st.success("✅ Blur area saved! This will be applied to all clips.")
+                                                    
+                                                    # Show preview of blurred first frame
+                                                    preview_frame = apply_blur_to_frame(first_frame, mask_binary, blur_level)
+                                                    st.write("**Preview:**")
+                                                    st.image(preview_frame, caption="Blur Preview", use_container_width=True)
+                                                else:
+                                                    st.warning("⚠️ No blur area drawn. Please draw on the canvas first.")
+                                            
+                                            except Exception as e:
+                                                st.error(f"Error saving blur mask: {e}")
+                                    
+                                    # Show saved blur info
+                                    if blur_key in st.session_state.blur_masks:
+                                        st.success(f"✅ Blur area saved (Level: {['Low', 'Medium', 'High'][st.session_state.blur_levels[blur_key]-1]})")
+                                else:
+                                    st.error("Could not extract first frame from video")
+                            else:
+                                # Clear blur if disabled
+                                if blur_key in st.session_state.blur_masks:
+                                    st.session_state.blur_masks.pop(blur_key, None)
+                                    st.session_state.blur_history.pop(blur_key, None)
+                            
                             # Clip time inputs
                             st.divider()
                             st.subheader("⏱️ Define Clip Time Ranges")
@@ -1493,6 +1796,14 @@ if st.session_state.searched:
                                         player_name = st.session_state.player_name.lower().replace(' ', '_')
                                         created_clips = []
                                         
+                                        # Get blur mask and level if enabled
+                                        blur_key = f"{st.session_state.assessment_id}_{drill_type}"
+                                        blur_mask = st.session_state.blur_masks.get(blur_key, None)
+                                        blur_level = st.session_state.blur_levels.get(blur_key, 1)
+                                        
+                                        if blur_mask is not None:
+                                            st.info(f"🎨 Applying blur (Level: {['Low', 'Medium', 'High'][blur_level-1]}) to all clips...")
+                                        
                                         progress_bar = st.progress(0)
                                         
                                         error_messages = []
@@ -1506,7 +1817,9 @@ if st.session_state.searched:
                                                 raw_video_info['bytes'],
                                                 start_time,
                                                 end_time,
-                                                clip_name
+                                                clip_name,
+                                                blur_mask=blur_mask,
+                                                blur_level=blur_level
                                             )
                                             
                                             if clip_bytes:
@@ -2456,6 +2769,10 @@ with st.sidebar:
         st.session_state.clip_selection_mode = {}
         st.session_state.auto_clips_cache = {}
         st.session_state.manual_clips_cache = {}
+        st.session_state.blur_masks = {}
+        st.session_state.blur_levels = {}
+        st.session_state.blur_history = {}
+        st.session_state.blur_enabled = {}
         st.success("Cache cleared!")
         st.rerun()
 
