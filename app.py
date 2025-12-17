@@ -13,6 +13,8 @@ import time
 import requests
 from typing import Dict, Any
 from dotenv import load_dotenv
+import cv2
+import numpy as np
 from PIL import Image
 import io
 from streamlit_drawable_canvas import st_canvas
@@ -581,29 +583,71 @@ def get_video_duration(video_bytes):
 def get_video_first_frame(video_bytes):
     """Extract first frame from video for blur mask creation"""
     temp_input_path = None
+    cap = None
     
     try:
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
+        # Validate input
+        if not video_bytes or len(video_bytes) == 0:
+            print("Error: Empty video_bytes provided")
+            return None
+        
+        print(f"Video bytes size: {len(video_bytes)} bytes")
+        
+        # Write to temp file
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False, mode='wb') as temp_input:
             temp_input.write(video_bytes)
             temp_input_path = temp_input.name
         
+        print(f"Temp file created: {temp_input_path}")
+        print(f"Temp file size: {os.path.getsize(temp_input_path)} bytes")
+        
+        # Verify OpenCV is available
+        if not hasattr(cv2, 'VideoCapture'):
+            print("Error: cv2.VideoCapture not available")
+            return None
+        
         # Use OpenCV to read first frame
         cap = cv2.VideoCapture(temp_input_path)
-        ret, frame = cap.read()
-        cap.release()
         
-        if ret:
+        if not cap.isOpened():
+            print("Error: Could not open video file with OpenCV")
+            # Try alternative approach using MoviePy
+            try:
+                print("Attempting fallback with MoviePy...")
+                video = VideoFileClip(temp_input_path)
+                frame = video.get_frame(0)
+                video.close()
+                print("Successfully extracted frame using MoviePy")
+                return frame
+            except Exception as moviepy_error:
+                print(f"MoviePy fallback failed: {moviepy_error}")
+                return None
+        
+        ret, frame = cap.read()
+        
+        if ret and frame is not None:
+            print(f"Frame extracted successfully: shape={frame.shape}")
             # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             return frame_rgb
         else:
+            print("Error: Could not read frame from video")
             return None
             
     except Exception as e:
-        print(f"Error extracting first frame: {e}")
+        print(f"Error extracting first frame: {type(e).__name__}: {e}")
+        import traceback
+        print(traceback.format_exc())
         return None
     
     finally:
+        # Release video capture
+        if cap is not None:
+            try:
+                cap.release()
+            except:
+                pass
+        
         # Clean up temp file
         time.sleep(0.1)
         if temp_input_path and os.path.exists(temp_input_path):
@@ -1614,7 +1658,8 @@ if st.session_state.searched:
                                 st.info("✏️ Draw on the image below to mark areas you want to blur in all clips")
                                 
                                 # Get first frame for blur mask creation
-                                first_frame = get_video_first_frame(raw_video_info['bytes'])
+                                with st.spinner("Extracting first frame..."):
+                                    first_frame = get_video_first_frame(raw_video_info['bytes'])
                                 
                                 if first_frame is not None:
                                     # Convert to PIL Image
@@ -1714,7 +1759,16 @@ if st.session_state.searched:
                                     if blur_key in st.session_state.blur_masks:
                                         st.success(f"✅ Blur area saved (Level: {['Low', 'Medium', 'High'][st.session_state.blur_levels[blur_key]-1]})")
                                 else:
-                                    st.error("Could not extract first frame from video")
+                                    st.error("❌ Could not extract first frame from video")
+                                    st.warning("""
+                                    **Troubleshooting:**
+                                    - Ensure OpenCV is properly installed: `opencv-python-headless`
+                                    - Check the server logs for detailed error messages
+                                    - Verify the video file is not corrupted
+                                    - Try reloading the page and searching again
+                                    
+                                    **For deployment issues:** Make sure `packages.txt` includes required system libraries.
+                                    """)
                             else:
                                 # Clear blur if disabled
                                 if blur_key in st.session_state.blur_masks:
@@ -2775,5 +2829,4 @@ with st.sidebar:
         st.session_state.blur_enabled = {}
         st.success("Cache cleared!")
         st.rerun()
-
 
