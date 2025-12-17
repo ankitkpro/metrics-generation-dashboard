@@ -1670,6 +1670,9 @@ if st.session_state.searched:
                                     aspect_ratio = pil_image.height / pil_image.width
                                     canvas_height = int(canvas_width * aspect_ratio)
                                     
+                                    # Resize the PIL image to canvas dimensions
+                                    pil_image_resized = pil_image.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
+                                    
                                     col1, col2 = st.columns([3, 1])
                                     
                                     with col1:
@@ -1691,7 +1694,7 @@ if st.session_state.searched:
                                             fill_color="rgba(255, 0, 0, 0.3)",
                                             stroke_width=20,
                                             stroke_color="rgba(255, 0, 0, 0.8)",
-                                            background_image=pil_image,
+                                            background_image=pil_image_resized,
                                             update_streamlit=True,
                                             height=canvas_height,
                                             width=canvas_width,
