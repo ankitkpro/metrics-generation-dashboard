@@ -56,7 +56,6 @@ drills_collection = staging_db['drill_results']
 
 
 
-
 # ============================================================================
 # DIAGNOSTIC CHECKS FOR MOVIEPY
 # ============================================================================
@@ -1353,6 +1352,16 @@ if 'mg_assessment_id_val' not in st.session_state:
     st.session_state.mg_assessment_id_val = ''
 if 'mg_player_name_val' not in st.session_state:
     st.session_state.mg_player_name_val = ''
+if 'mg_drill_metrics_data' not in st.session_state:
+    st.session_state.mg_drill_metrics_data = {}
+if 'mg_edited_angles' not in st.session_state:
+    st.session_state.mg_edited_angles = {}
+if 'mg_edited_directions' not in st.session_state:
+    st.session_state.mg_edited_directions = {}
+if 'mg_original_values' not in st.session_state:
+    st.session_state.mg_original_values = {}
+if 'mg_mongo_drill_keys' not in st.session_state:
+    st.session_state.mg_mongo_drill_keys = {}
 
 # ============================================================================
 # STREAMLIT APP UI
@@ -2784,6 +2793,11 @@ with tab_manual:
             st.session_state.mg_task_status = {}
             st.session_state.mg_saved_coach_feedback = {}
             st.session_state.mg_running_drill_inputs = {}
+            st.session_state.mg_drill_metrics_data = {}
+            st.session_state.mg_edited_angles = {}
+            st.session_state.mg_edited_directions = {}
+            st.session_state.mg_original_values = {}
+            st.session_state.mg_mongo_drill_keys = {}
             st.rerun()
 
     if st.session_state.mg_assessment_started and st.session_state.mg_assessment_id_val and st.session_state.mg_player_name_val:
@@ -3636,6 +3650,173 @@ with tab_manual:
                                         with st.expander("View Full Status", expanded=mg_is_done):
                                             st.json(mg_st_data)
 
+                                        # Metrics editor — drive drills only
+                                        if mg_is_done and mg_drill_type in ['tophand', 'bottomhand', 'backfoot_drive', 'backfoot_defense']:
+                                            st.divider()
+                                            st.subheader("✏️ Edit Metrics")
+
+                                            mg_metrics_key = f"{mg_assessment_id}_{mg_drill_type}"
+
+                                            if mg_metrics_key not in st.session_state.mg_drill_metrics_data:
+                                                with st.spinner("Loading drill metrics from MongoDB..."):
+                                                    mg_drill_doc = fetch_drill_results(mg_assessment_id)
+
+                                                    if mg_drill_doc and 'drill_metrics' in mg_drill_doc:
+                                                        mg_all_metrics = mg_drill_doc['drill_metrics']
+                                                        mg_avail_drills = list(mg_all_metrics.keys())
+                                                        st.info(f"📋 Available drills in MongoDB: {', '.join(mg_avail_drills)}")
+
+                                                        mg_mongo_key = get_mongo_drill_key(mg_drill_type)
+                                                        mg_possible_keys = [mg_mongo_key, mg_drill_type]
+                                                        mg_found_key = None
+
+                                                        for mg_k in mg_possible_keys:
+                                                            if mg_k in mg_all_metrics:
+                                                                mg_found_key = mg_k
+                                                                break
+
+                                                        if mg_found_key:
+                                                            st.session_state.mg_drill_metrics_data[mg_metrics_key] = mg_all_metrics[mg_found_key]
+                                                            st.session_state.mg_mongo_drill_keys[mg_metrics_key] = mg_found_key
+
+                                                            mg_m = mg_all_metrics[mg_found_key]
+                                                            mg_shot_angles = mg_m.get('shot_direction_angles', [])
+                                                            mg_ball_dirs = mg_m.get('ball_directions', [])
+
+                                                            if not mg_shot_angles or not mg_ball_dirs:
+                                                                st.error(f"⚠️ Drill '{mg_found_key}' has no shot_direction_angles or ball_directions data")
+                                                            else:
+                                                                st.session_state.mg_edited_angles[mg_metrics_key] = mg_shot_angles.copy()
+                                                                st.session_state.mg_edited_directions[mg_metrics_key] = mg_ball_dirs.copy()
+                                                                st.session_state.mg_original_values[mg_metrics_key] = {
+                                                                    'angles': mg_shot_angles.copy(),
+                                                                    'directions': mg_ball_dirs.copy()
+                                                                }
+                                                        else:
+                                                            st.warning(f"❌ No metrics found for '{mg_drill_type}' (tried: {', '.join(mg_possible_keys)})")
+                                                            st.write("**Available drill types:**")
+                                                            for mg_ad in mg_avail_drills:
+                                                                st.write(f"- {mg_ad}")
+                                                    else:
+                                                        st.warning("No drill results found in MongoDB for this assessment")
+
+                                            if mg_metrics_key in st.session_state.mg_drill_metrics_data:
+                                                mg_metrics = st.session_state.mg_drill_metrics_data[mg_metrics_key]
+                                                mg_mongo_drill_key = st.session_state.mg_mongo_drill_keys.get(mg_metrics_key, mg_drill_type)
+
+                                                # Detect batter hand
+                                                mg_batter_hand = 'Right'
+                                                if 'new_metrics' in mg_metrics and 'batter_hand' in mg_metrics['new_metrics']:
+                                                    mg_bh_list = mg_metrics['new_metrics']['batter_hand']
+                                                    if mg_bh_list:
+                                                        mg_batter_hand = max(set(mg_bh_list), key=mg_bh_list.count)
+
+                                                st.write(f"**Batter Hand:** {mg_batter_hand}")
+                                                st.write(f"**MongoDB Drill Key:** `{mg_mongo_drill_key}`")
+
+                                                mg_ball_dir_opts = ['Off Stump', 'Outside Off Stump', 'Middle Stump', 'Leg Stump']
+                                                mg_num_shots = len(st.session_state.mg_edited_angles[mg_metrics_key])
+                                                st.write(f"**Number of Shots:** {mg_num_shots}")
+                                                st.write("**Edit Shot Direction Angles and Ball Directions:**")
+
+                                                mg_hc1, mg_hc2, mg_hc3 = st.columns([1, 2, 2])
+                                                with mg_hc1:
+                                                    st.write("**Shot #**")
+                                                with mg_hc2:
+                                                    st.write("**Shot Direction Angle**")
+                                                with mg_hc3:
+                                                    st.write("**Ball Direction**")
+
+                                                for mg_si in range(mg_num_shots):
+                                                    mg_c1, mg_c2, mg_c3 = st.columns([1, 2, 2])
+                                                    with mg_c1:
+                                                        st.write(f"Shot {mg_si+1}")
+                                                    with mg_c2:
+                                                        mg_cur_angle = st.session_state.mg_edited_angles[mg_metrics_key][mg_si]
+                                                        mg_new_angle = st.number_input(
+                                                            f"Angle {mg_si+1}",
+                                                            value=float(mg_cur_angle),
+                                                            step=1.0,
+                                                            key=f"mg_angle_{mg_drill_type}_{mg_si}",
+                                                            label_visibility="collapsed"
+                                                        )
+                                                        st.session_state.mg_edited_angles[mg_metrics_key][mg_si] = mg_new_angle
+                                                    with mg_c3:
+                                                        mg_cur_dir = st.session_state.mg_edited_directions[mg_metrics_key][mg_si]
+                                                        mg_dir_idx = mg_ball_dir_opts.index(mg_cur_dir) if mg_cur_dir in mg_ball_dir_opts else 0
+                                                        mg_new_dir = st.selectbox(
+                                                            f"Ball Direction {mg_si+1}",
+                                                            options=mg_ball_dir_opts,
+                                                            index=mg_dir_idx,
+                                                            key=f"mg_direction_{mg_drill_type}_{mg_si}",
+                                                            label_visibility="collapsed"
+                                                        )
+                                                        st.session_state.mg_edited_directions[mg_metrics_key][mg_si] = mg_new_dir
+
+                                                mg_angles_changed = st.session_state.mg_edited_angles[mg_metrics_key] != st.session_state.mg_original_values[mg_metrics_key]['angles']
+                                                mg_dirs_changed = st.session_state.mg_edited_directions[mg_metrics_key] != st.session_state.mg_original_values[mg_metrics_key]['directions']
+                                                mg_vals_changed = mg_angles_changed or mg_dirs_changed
+
+                                                mg_upd_col1, _, _ = st.columns([1, 2, 2])
+                                                with mg_upd_col1:
+                                                    mg_update_btn = st.button(
+                                                        "💾 Update Metrics",
+                                                        key=f"mg_update_{mg_drill_type}",
+                                                        disabled=not mg_vals_changed,
+                                                        use_container_width=True
+                                                    )
+
+                                                if mg_vals_changed:
+                                                    st.info("⚠️ You have unsaved changes")
+
+                                                if mg_update_btn:
+                                                    with st.spinner("Updating metrics..."):
+                                                        try:
+                                                            mg_updated = recalculate_metrics(
+                                                                mg_metrics,
+                                                                st.session_state.mg_edited_angles[mg_metrics_key],
+                                                                st.session_state.mg_edited_directions[mg_metrics_key],
+                                                                mg_batter_hand
+                                                            )
+
+                                                            mg_upd_success = update_drill_results_in_mongo(
+                                                                mg_assessment_id,
+                                                                mg_mongo_drill_key,
+                                                                mg_updated
+                                                            )
+
+                                                            if mg_upd_success:
+                                                                st.success("✅ Metrics updated successfully in MongoDB!")
+
+                                                                st.session_state.mg_drill_metrics_data[mg_metrics_key] = mg_updated
+                                                                st.session_state.mg_original_values[mg_metrics_key] = {
+                                                                    'angles': st.session_state.mg_edited_angles[mg_metrics_key].copy(),
+                                                                    'directions': st.session_state.mg_edited_directions[mg_metrics_key].copy()
+                                                                }
+
+                                                                st.divider()
+                                                                st.subheader("📊 Updated Metrics")
+                                                                with st.expander("View Updated MongoDB Document", expanded=True):
+                                                                    st.json(mg_updated)
+
+                                                                mg_mc1, mg_mc2, mg_mc3 = st.columns(3)
+                                                                with mg_mc1:
+                                                                    st.metric("Grade", mg_updated.get('grade', 'N/A'))
+                                                                with mg_mc2:
+                                                                    st.metric("Percentile", f"{mg_updated.get('percentile', 0)}%")
+                                                                with mg_mc3:
+                                                                    if 'new_metrics' in mg_updated and 'score' in mg_updated['new_metrics']:
+                                                                        mg_avg = sum(mg_updated['new_metrics']['score']) / len(mg_updated['new_metrics']['score'])
+                                                                        st.metric("Avg Score", f"{mg_avg:.2f}")
+
+                                                                st.rerun()
+                                                            else:
+                                                                st.error("❌ Failed to update metrics in MongoDB")
+
+                                                        except Exception as e:
+                                                            st.error(f"Error updating metrics: {str(e)}")
+                                                            st.exception(e)
+
 # ============================================================================
 # SIDEBAR
 # ============================================================================
@@ -3778,7 +3959,11 @@ with st.sidebar:
         st.session_state.mg_task_status = {}
         st.session_state.mg_saved_coach_feedback = {}
         st.session_state.mg_running_drill_inputs = {}
+        st.session_state.mg_drill_metrics_data = {}
+        st.session_state.mg_edited_angles = {}
+        st.session_state.mg_edited_directions = {}
+        st.session_state.mg_original_values = {}
+        st.session_state.mg_mongo_drill_keys = {}
         st.success("Cache cleared!")
         st.rerun()
-
 
