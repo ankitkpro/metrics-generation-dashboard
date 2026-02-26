@@ -18,42 +18,31 @@ from streamlit_drawable_canvas import st_canvas
 
 load_dotenv()
 
+
+
 # ============================================================================
 # CONFIGURATION & CONSTANTS
 # ============================================================================
 
 GCS_BUCKET_NAME = "qr-ai"
 GCS_PARENT_FOLDER_NAME = "cricket_batting/"
-# SERVICE_ACCOUNT_FILE = os.getenv("SERVICE_ACCOUNT_FILE")
-SERVICE_ACCOUNT_FILE_JSON = st.secrets["SERVICE_ACCOUNT_FILE"]
-# st.write(type(SERVICE_ACCOUNT_FILE_JSON))
-# SERVICE_ACCOUNT_FILE = json.loads(SERVICE_ACCOUNT_FILE_JSON)
-SERVICE_ACCOUNT_FILE = SERVICE_ACCOUNT_FILE_JSON
-# st.write(SERVICE_ACCOUNT_FILE.keys())
+SERVICE_ACCOUNT_FILE = st.secrets["SERVICE_ACCOUNT_FILE"]
 
-
-# BASE_URL = os.getenv("FLYTE_API_BASE_URL")
 BASE_URL = st.secrets["FLYTE_API_BASE_URL"]
 API_KEY = os.getenv("FLYTE_API_KEY")
 
 # MongoDB connection
-# connection_string = os.getenv("MONGO_CONNECTION_STRING")
 connection_string = st.secrets["MONGO_CONNECTION_STRING"]
 client = MongoClient(connection_string)
 db = client['kpro']
 gallery_collection = db['gallery']
 users_collection = db['users']
 
-
 # MongoDB staging connection for drill results
-# staging_connection_string = ''
 staging_connection_string = st.secrets["MONGO_CONNECTION_STRING_STAGING"]
 staging_client = MongoClient(staging_connection_string)
 staging_db = staging_client['kpro']
 drills_collection = staging_db['drill_results']
-
-
-
 
 
 # ============================================================================
@@ -937,8 +926,14 @@ def update_drill_results_in_mongo(assessment_id, drill_type, updated_metrics):
                 f"drill_metrics.{drill_type}": updated_metrics
             }
         }
-        result = drills_collection.update_one(search_query, update_query)
-        return result.modified_count > 0
+        result = drills_collection.update_one(search_query, update_query, upsert=False)
+        print(f"MongoDB update — matched: {result.matched_count}, modified: {result.modified_count}, assessment_id: {assessment_id}, drill: {drill_type}")
+        if result.matched_count == 0:
+            print(f"⚠️ No document found with assessment_id='{assessment_id}' in drills collection")
+            return False
+        # matched_count > 0 means the document was found and the $set was applied
+        # (modified_count can be 0 if the new value is identical to the stored value)
+        return True
     except Exception as e:
         print(f"Error updating drill results: {e}")
         return False
@@ -2731,7 +2726,7 @@ with tab_search:
                                                             
                                                             st.rerun()
                                                         else:
-                                                            st.error("❌ Failed to update metrics in MongoDB")
+                                                            st.error(f"❌ Failed to update metrics — no document found with assessment_id=`{st.session_state.assessment_id}` in MongoDB. Check the console logs for details.")
                                                     
                                                     except Exception as e:
                                                         st.error(f"Error updating metrics: {str(e)}")
@@ -3811,7 +3806,7 @@ with tab_manual:
 
                                                                 st.rerun()
                                                             else:
-                                                                st.error("❌ Failed to update metrics in MongoDB")
+                                                                st.error(f"❌ Failed to update metrics — no document found with assessment_id=`{mg_assessment_id}` in MongoDB. Check the console logs for details.")
 
                                                         except Exception as e:
                                                             st.error(f"Error updating metrics: {str(e)}")
@@ -3966,4 +3961,3 @@ with st.sidebar:
         st.session_state.mg_mongo_drill_keys = {}
         st.success("Cache cleared!")
         st.rerun()
-
