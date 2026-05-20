@@ -984,26 +984,44 @@ def get_coach_feedback_from_mongo(assessment_id, drill_type):
         return ''
 
 def search_assessment(assessment_id):
-    """Search for player and drills by assessment ID"""
+    """Search for player and drills by assessment ID.
+
+    Returns a 4-tuple: (player_full_name, drill_data, error, diagnostic).
+    `diagnostic` is a list of dicts (one per gallery doc) used to surface why
+    drills may have been filtered out — populated whenever a user record is
+    found, regardless of whether any drills pass the status filter.
+    """
     try:
         user_query = {"_id": assessment_id}
         user_result = users_collection.find_one(user_query)
-        
+
         if not user_result:
-            return None, None, "Assessment ID not found"
-        
+            return None, None, "Assessment ID not found", None
+
         player_full_name = user_result.get('name', 'Unknown')
-        
+
         gallery_query = {"user_id": assessment_id}
-        gallery_results = gallery_collection.find(gallery_query)
-        
+        gallery_results = list(gallery_collection.find(gallery_query))
+
+        # Build diagnostic snapshot of every gallery doc for this user
+        diagnostic = [
+            {
+                'title': d.get('title', ''),
+                'status': d.get('status', '<missing>'),
+                'clip_count': len(d.get('clips', []) or []),
+                'drill_id': d.get('drill_id', ''),
+                'activity_id': d.get('activity_id', ''),
+            }
+            for d in gallery_results
+        ]
+
         drill_data = {}
         for doc in gallery_results:
             # Only process records with status 'processed' or 'uploaded'
             doc_status = doc.get('status', '')
             if doc_status not in ['processed', 'uploaded']:
                 continue
-            
+
             drill = doc.get('title', '')
             clips = doc.get('clips', [])
             drill_id = doc.get('drill_id', '')
@@ -1050,12 +1068,28 @@ def search_assessment(assessment_id):
                 }
         
         if not drill_data:
-            return player_full_name, None, "No drills found for this assessment"
-        
-        return player_full_name, drill_data, None
-        
+            if diagnostic:
+                # Records exist but none passed the status filter — distinguish
+                # this from the truly-empty case so the UI can be specific.
+                return (
+                    player_full_name,
+                    None,
+                    "No drills found for this assessment "
+                    "(records exist but none are in 'processed' or 'uploaded' state)",
+                    diagnostic,
+                )
+            return (
+                player_full_name,
+                None,
+                "No drills found for this assessment "
+                "(no gallery documents exist for this user_id)",
+                diagnostic,
+            )
+
+        return player_full_name, drill_data, None, diagnostic
+
     except Exception as e:
-        return None, None, f"Error: {str(e)}"
+        return None, None, f"Error: {str(e)}", None
 
 def download_and_process_clips(assessment_id, player_full_name, drill_type, clips):
     """Download and process clips for a specific drill type, using cache if available"""
@@ -1390,10 +1424,30 @@ with tab_search:
     # Search functionality
     if search_button and assessment_id:
         with st.spinner('Searching...'):
-            player_name, drill_data, error = search_assessment(assessment_id)
-        
+            player_name, drill_data, error, diagnostic = search_assessment(assessment_id)
+
         if error:
             st.error(error)
+            if diagnostic:
+                # Surface the gallery-doc snapshot so the operator can see WHY
+                # nothing rendered (failed pipeline, never uploaded, etc.).
+                if player_name:
+                    st.info(f"Player record found: **{player_name}** "
+                            f"({len(diagnostic)} gallery document(s) exist for this assessment)")
+
+                status_counts: dict = {}
+                for row in diagnostic:
+                    status_counts[row['status']] = status_counts.get(row['status'], 0) + 1
+                st.write("**Status distribution:**", status_counts)
+
+                with st.expander("🔎 Gallery document details (diagnostic)", expanded=True):
+                    st.caption(
+                        "Drills are only rendered when their gallery document is in "
+                        "`processed` or `uploaded` state. Anything in `failed` / `created` "
+                        "indicates the upstream pipeline didn't produce clips, or the "
+                        "player hasn't uploaded video yet."
+                    )
+                    st.table(diagnostic)
             st.session_state.searched = False
         else:
             st.session_state.searched = True

@@ -1,1 +1,34 @@
+# Environment / secrets
 .env
+.env.*
+secrets.txt
+secrets.local.txt
+*.secrets.txt
+.streamlit/secrets.toml
+service_account*.json
+credentials*.json
+
+# Debug/scratch scripts
+debug_*.py
+scratch_*.py
+_debug/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Streamlit cache
+.streamlit/cache/
